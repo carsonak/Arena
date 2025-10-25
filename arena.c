@@ -137,7 +137,7 @@ fb_search(Free_block *restrict *const restrict start, const size_t size)
  */
 void *arena_alloc(Arena *const restrict arena, size_t size, size_t alignment)
 {
-	if (!arena || size < 1 || alignment < size || IS_POWER2(alignment))
+	if (!arena || size < 1 || alignment < size || !IS_POWER2(alignment))
 		return (NULL);
 
 	/* Search the free list first. */
