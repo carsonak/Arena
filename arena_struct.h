@@ -1,7 +1,7 @@
 #ifndef ARENA_STRUCT_H
 #define ARENA_STRUCT_H
 
-#include <stdint.h>  // size_t
+#include <stddef.h>  // size_t
 
 typedef struct Free_block
 {

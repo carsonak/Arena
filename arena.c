@@ -68,7 +68,7 @@ void *arena_destroy(Arena *const restrict arena)
  * @param capacity positive non-zero capacity in bytes of the arena to allocate.
  * @returns pointer to the new arena, NULL on error.
  */
-Arena *arena_create(const size_t capacity)
+Arena *arena_create(size_t capacity)
 {
 	if (capacity < 1)
 		return (NULL);
@@ -78,9 +78,14 @@ Arena *arena_create(const size_t capacity)
 	if (!arena)
 		return (NULL);
 
-	*arena = (Arena){.capacity = capacity, .base = malloc(capacity)};
+	/* Guarantee atleast 1 allocation of size `capacity`, alignment 1. */
+	*arena = (Arena){.capacity = capacity,
+					 .base = malloc(capacity + sizeof(Free_block))};
 	if (!arena->base)
-		return (arena_destroy(arena));
+	{
+		free(arena);
+		return (NULL);
+	}
 
 	return (arena);
 }
@@ -109,7 +114,7 @@ void arena_reset(Arena *const restrict arena)
 static Free_block *
 fb_search(Free_block *restrict *const restrict start, const size_t size)
 {
-	Free_block **restrict prev = start;
+	Free_block *restrict *restrict prev = start;
 
 	for (Free_block *block = *start; block; block = block->next)
 	{
@@ -135,38 +140,42 @@ fb_search(Free_block *restrict *const restrict start, const size_t size)
  * @returns an aligned pointer to a memory block atleast `size` bytes,
  * NULL on error.
  */
-void *arena_alloc(Arena *const restrict arena, size_t size, size_t alignment)
+void *
+arena_alloc(Arena *const restrict arena, const size_t size, size_t alignment)
 {
-	if (!arena || size < 1 || alignment < size || !IS_POWER2(alignment))
+	if (!arena || size < 1 || alignment > size || !IS_POWER2(alignment))
 		return (NULL);
 
 	/* Search the free list first. */
-	size = alignment > size ? alignment : size;
-	Free_block *restrict block = fb_search(&arena->free_list, size);
+	Free_block *block = fb_search(&arena->free_list, size);
+	const size_t alignof_fb = _alignof(Free_block);
 
 	if (block)
-		return ((unsigned char *)block + _alignof(block->size));
+		return ((void *)align_forward((size_t)block + alignof_fb, alignment));
 
 	/* Otherwise, allocate from bump pointer. */
-	alignment =
-		_alignof(block->size) > alignment ? _alignof(block->size) : alignment;
+
+	alignment = alignof_fb > alignment ? alignof_fb : alignment;
+	/* Guarantee new allocation can fit a `Free_block` by adding padding if */
+	/* necessary. */
+	size_t padding = 0;
+	if (size < (sizeof(block) - alignof_fb))
+		padding = (sizeof(block) - alignof_fb) - size;
+
 	/* Pointer to free memory in the arena. */
-	unsigned char *const restrict current = arena->base + arena->offset;
+	const size_t current = (size_t)arena->base + arena->offset;
 	/* An aligned pointer after `current` with enough space between it and */
 	/* `current` to store the size of the new allocation. */
-	unsigned char *const restrict aligned =
-		align_forward(current + alignment, alignment);
-	const size_t new_offset = aligned + size - (size_t)arena->base;
+	const size_t aligned = align_forward(current + alignment, alignment);
+	const size_t new_offset = aligned + size + padding - (size_t)arena->base;
 
 	if (new_offset > arena->capacity)
 		return (NULL);  // out of memory
 
 	arena->offset = new_offset;
-	block = align_backward(
-		(size_t)aligned - _alignof(block->size), _alignof(block->size)
-	);
+	block = (Free_block *)align_backward(aligned - alignof_fb, alignof_fb);
 	*block = (Free_block){.size = size};
-	return (aligned);
+	return ((void *)aligned);
 }
 
 /*!
@@ -181,8 +190,8 @@ void *arena_free(Arena *const restrict arena, void *const restrict ptr)
 	if (!arena || !ptr)
 		return (NULL);
 
-	Free_block *const restrict block = align_backward(
-		(size_t)ptr - _alignof(block->size), _alignof(block->size)
+	Free_block *const restrict block = (Free_block *)align_backward(
+		(size_t)ptr - _alignof(size_t), _alignof(size_t)
 	);
 
 	block->next = arena->free_list;
