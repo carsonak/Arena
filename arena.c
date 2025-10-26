@@ -3,13 +3,6 @@
 #include <stdlib.h>  // *alloc
 #include <string.h>  // memset
 
-// === Feature toggles ===
-// Comment or uncomment these to enable/disable enhancements
-// #define ENABLE_ARENA_COALESCE
-// #define ENABLE_ARENA_SORTED_FREELIST
-// #define ENABLE_ARENA_SPLIT_BLOCKS
-// #define ENABLE_ARENA_STATS
-
 #include "arena.h"
 #include "arena_struct.h"
 #include "compiler_attributes_macros.h"
@@ -117,7 +110,9 @@ void arena_reset(Arena *const restrict arena)
 	if (arena)
 	{
 		arena->offset = 0;
-		arena->free_list = NULL;
+#if defined ENABLE_FREE_LIST || defined ENABLE_SIZE_CLASSES
+		memset((void *)arena->blocks, 0, sizeof(arena->blocks));
+#endif /* defined ENABLE_FREE_LIST || defined ENABLE_SIZE_CLASSES */
 #if defined(ENABLE_ARENA_STATS)
 		arena->num_allocs = 0;
 		arena->num_frees = 0;
@@ -125,6 +120,23 @@ void arena_reset(Arena *const restrict arena)
 #endif
 	}
 }
+
+#ifdef ENABLE_SIZE_CLASSES
+static Free_block *restrict *
+size_class_index(Arena *const restrict arena, const size_t size)
+{
+	size_t i = 0;
+	while (i < ARRAY_LEN(ARENA_SIZE_CLASSES))
+	{
+		if (size > ARENA_SIZE_CLASSES[i] && arena->blocks[i])
+			break;
+
+		i++;
+	}
+
+	return (&arena->blocks[i]);
+}
+#endif /* ENABLE_SIZE_CLASSES */
 
 /*!
  * @brief search for a `Free_block` of atleast the given size.
@@ -134,18 +146,17 @@ void arena_reset(Arena *const restrict arena)
  * @returns pointer to the first block with a size greater or equal to `size`, NULL otherwise.
  */
 static Free_block *fb_search(
-	Free_block *restrict *const restrict start, const size_t size,
-	const size_t alignment
+	Arena *const restrict arena, const size_t size, const size_t alignment
 )
 {
 	assert(IS_POWER2(alignment));
-#if defined(ENABLE_ARENA_SORTED_FREELIST)
-	// Optional: free list sorted by address, can improve coalescing
-	// (actual implementation will come next step)
-#endif
-	Free_block *restrict *restrict prev = start;
+#if defined ENABLE_FREE_LIST
+	Free_block *restrict *restrict prev = &arena->blocks;
+#elif defined ENABLE_SIZE_CLASSES
+	Free_block *restrict *restrict prev = size_class_index(arena, size);
+#endif /* ENABLE_FREE_LIST */
 
-	for (Free_block *block = *start; block; block = block->next)
+	for (Free_block *block = *prev; block; block = block->next)
 	{
 		const size_t bs = block->size;
 		u8 *const restrict mem = (u8 *)block + sizeof(block->size);
@@ -182,7 +193,7 @@ arena_alloc(Arena *const restrict arena, size_t size, const size_t alignment)
 	const size_t alignof_fb = _alignof(Free_block);
 	/* Search the free list first. */
 
-	Free_block *restrict block = fb_search(&arena->free_list, size, alignment);
+	Free_block *restrict block = fb_search(arena, size, alignment);
 
 	if (block)
 	{
@@ -238,7 +249,7 @@ arena_alloc(Arena *const restrict arena, size_t size, const size_t alignment)
  *
  * @returns pointer to the start of the `Free_block`.
  */
-static Free_block *get_block_start(u8 *restrict ptr)
+static Free_block *fb_start_address(u8 *restrict ptr)
 {
 	do
 	{
@@ -246,6 +257,19 @@ static Free_block *get_block_start(u8 *restrict ptr)
 	} while (*ptr == 0);
 
 	return ((Free_block *)align_down((size_t)ptr, sizeof(size_t)));
+}
+
+static void
+fb_insert(Arena *const restrict arena, Free_block *const restrict block)
+{
+#ifdef ENABLE_FREE_LIST
+	Free_block *restrict *restrict slot = &arena->blocks;
+#elif defined ENABLE_SIZE_CLASSES
+	Free_block *restrict *restrict slot = size_class_index(arena, block->size);
+#endif /* ENABLE_FREE_LIST */
+
+	block->next = *slot;
+	*slot = block;
 }
 
 /*!
@@ -260,13 +284,9 @@ void *arena_free(Arena *const restrict arena, void *const restrict ptr)
 	if (!arena || !ptr)
 		return (NULL);
 
-	Free_block *const restrict block = get_block_start(ptr);
+	Free_block *const restrict block = fb_start_address(ptr);
 
-#if defined(ENABLE_ARENA_COALESCE)
-	// Next step: coalescing logic (merge adjacent blocks)
-#endif
-	block->next = arena->free_list;
-	arena->free_list = block;
+	fb_insert(arena, block);
 #if defined(ENABLE_ARENA_STATS)
 	arena->num_frees++;
 #endif

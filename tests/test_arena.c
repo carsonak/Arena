@@ -1,4 +1,5 @@
 #include <stddef.h>  // size_t
+#include <string.h>  // memcmp
 
 #include "arena.h"         // The Arena allocator API
 #include "arena_struct.h"  // Access to the internal Arena struct for checking
@@ -7,7 +8,13 @@
 TAU_MAIN()
 
 #define CHECK_ALIGNED(ptr, alignment)                                         \
-	CHECK_EQ(((size_t)(ptr) % (alignment)), 0, "Pointee not aligned")
+	CHECK_EQ(((size_t)(ptr) % (alignment)), 0, "Pointer not aligned")
+
+#define BLOCKS_ISEMPTY(blocks)                                                \
+	((!blocks) ||                                                             \
+	 memcmp(                                                                  \
+		 (void *)(blocks), (unsigned char[sizeof(blocks)]){0}, sizeof(blocks) \
+	 ) == 0)
 
 // --- Test Suite for Arena Lifecycle ---
 
@@ -178,12 +185,15 @@ TEST_F(ArenaFreeList, FreeAndReuse)
 	void *p_other = arena_alloc(tau->a, 64, 64);
 	REQUIRE_NOT_NULL(p_other);
 
-	REQUIRE_NULL(tau->a->free_list, "Free list should initially be empty");
+	REQUIRE_TRUE(
+		BLOCKS_ISEMPTY(tau->a->blocks), "Free list should initially be empty"
+	);
 
 	// Free a pointer.
 	arena_free(tau->a, ptr_to_free);
-	CHECK_NOT_NULL(
-		tau->a->free_list, "Free list should have one block after first free"
+	CHECK_FALSE(
+		BLOCKS_ISEMPTY(tau->a->blocks),
+		"Free list should have one block after first free"
 	);
 
 	const size_t offset = tau->a->offset;
@@ -195,7 +205,9 @@ TEST_F(ArenaFreeList, FreeAndReuse)
 	CHECK_EQ(tau->a->offset, offset, "freed memory should be reused");
 
 	// The free list should be empty again
-	CHECK_NULL(tau->a->free_list, "Free list should be empty after reuse");
+	CHECK_TRUE(
+		BLOCKS_ISEMPTY(tau->a->blocks), "Free list should be empty after reuse"
+	);
 
 	// Allocate another, should bump from the main offset
 	void *p_bumped = arena_alloc(tau->a, 64, 64);
@@ -210,7 +222,9 @@ TEST_F(ArenaFreeList, FreeNull)
 	// Freeing NULL should be a safe no-op
 	void *p = arena_free(tau->a, NULL);
 	CHECK_NULL(p, "arena_free(a, NULL) should return NULL");
-	CHECK_NULL(tau->a->free_list, "Free list should still be empty");
+	CHECK_TRUE(
+		BLOCKS_ISEMPTY(tau->a->blocks), "Free list should still be empty"
+	);
 
 	// Freeing with a NULL arena should also be a no-op
 	p = arena_free(NULL, (void *)0x123cdf);
@@ -225,7 +239,7 @@ TEST_F(ArenaFreeList, ReuseSmaller)
 
 	// Free it
 	arena_free(tau->a, p128);
-	REQUIRE_NOT_NULL(tau->a->free_list);
+	REQUIRE_FALSE(BLOCKS_ISEMPTY(tau->a->blocks));
 
 	const size_t offset = tau->a->offset;
 	// Allocate a 64-byte block.
@@ -237,8 +251,9 @@ TEST_F(ArenaFreeList, ReuseSmaller)
 	// Should reuse the same pointer address
 	CHECK_EQ(tau->a->offset, offset, "freed memory should be reused");
 	// The free list should now be empty, as the 128-byte block was "consumed"
-	CHECK_NULL(
-		tau->a->free_list, "Free list should be empty after consuming block"
+	CHECK_TRUE(
+		BLOCKS_ISEMPTY(tau->a->blocks),
+		"Free list should be empty after consuming block"
 	);
 }
 
@@ -270,8 +285,9 @@ TEST_F(FreeAndReuse, FreeBigSmallReuseSmallBig)
 	// Free big memory then small memory.
 
 	arena_free(tau->a, tau->p2);
-	REQUIRE_NOT_NULL(
-		tau->a->free_list, "Free list should have one block after first free"
+	REQUIRE_FALSE(
+		BLOCKS_ISEMPTY(tau->a->blocks),
+		"Free list should have one block after first free"
 	);
 	arena_free(tau->a, tau->p1);
 
@@ -289,8 +305,9 @@ TEST_F(FreeAndReuse, FreeBigSmallReuseBigSmall)
 	// Free big memory then small memory.
 
 	arena_free(tau->a, tau->p2);
-	REQUIRE_NOT_NULL(
-		tau->a->free_list, "Free list should have one block after first free"
+	REQUIRE_FALSE(
+		BLOCKS_ISEMPTY(tau->a->blocks),
+		"Free list should have one block after first free"
 	);
 	arena_free(tau->a, tau->p1);
 
@@ -308,8 +325,9 @@ TEST_F(FreeAndReuse, FreeSmallBigReuseBigSmall)
 	// Free small memory then big memory.
 
 	arena_free(tau->a, tau->p1);
-	REQUIRE_NOT_NULL(
-		tau->a->free_list, "Free list should have one block after first free"
+	REQUIRE_FALSE(
+		BLOCKS_ISEMPTY(tau->a->blocks),
+		"Free list should have one block after first free"
 	);
 	arena_free(tau->a, tau->p2);
 
@@ -327,8 +345,9 @@ TEST_F(FreeAndReuse, FreeSmallBigReuseSmallBig)
 	// Free small memory then big memory.
 
 	arena_free(tau->a, tau->p1);
-	REQUIRE_NOT_NULL(
-		tau->a->free_list, "Free list should have one block after first free"
+	REQUIRE_FALSE(
+		BLOCKS_ISEMPTY(tau->a->blocks),
+		"Free list should have one block after first free"
 	);
 	arena_free(tau->a, tau->p2);
 
@@ -358,25 +377,28 @@ TEST_F_TEARDOWN(ArenaReset) { tau->a = arena_delete(tau->a); }
 
 TEST_F(ArenaReset, Reset)
 {
-	// Allocate, free, and allocate again to populate offset and free_list
+	// Allocate, free, and allocate again to populate offset and blocks
 	void *p1 = arena_alloc(tau->a, 64, 64);
 	REQUIRE_NOT_NULL(p1);
 	arena_free(tau->a, p1);                    // p1 is on free list
 	void *p2 = arena_alloc(tau->a, 128, 128);  // p2 is bumped
 	REQUIRE_NOT_NULL(p2);
 
-	// Check that offset is non-zero and free_list is non-null
+	// Check that offset is non-zero and blocks is non-null
 	CHECK_NE(tau->a->offset, 0, "Offset should be non-zero before reset");
-	CHECK_NOT_NULL(
-		tau->a->free_list, "Free list should be non-null before reset"
+	CHECK_FALSE(
+		BLOCKS_ISEMPTY(tau->a->blocks),
+		"Free list should be non-null before reset"
 	);
 
 	// Reset the arena
 	arena_reset(tau->a);
 
-	// Check that offset and free_list are cleared
+	// Check that offset and blocks are cleared
 	CHECK_EQ(tau->a->offset, 0, "Offset should be 0 after reset");
-	CHECK_NULL(tau->a->free_list, "Free list should be NULL after reset");
+	CHECK_TRUE(
+		BLOCKS_ISEMPTY(tau->a->blocks), "Free list should be NULL after reset"
+	);
 
 	// Allocate again
 	void *p3 = arena_alloc(tau->a, 64, 64);
