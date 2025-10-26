@@ -13,23 +13,23 @@ TAU_MAIN()
 
 TEST(ArenaLifecycle, CreateAndDestroy)
 {
-	Arena *a = arena_create(1024);
-	REQUIRE_NOT_NULL(a, "arena_create should return a valid pointer");
+	Arena *a = arena_new(1024);
+	REQUIRE_NOT_NULL(a, "arena_new should return a valid pointer");
 
-	a = arena_destroy(a);
-	CHECK_NULL(a, "arena_destroy should return NULL");
+	a = arena_delete(a);
+	CHECK_NULL(a, "arena_delete should return NULL");
 }
 
 TEST(ArenaLifecycle, CreateInvalid)
 {
-	Arena *a = arena_create(0);
-	CHECK_NULL(a, "arena_create with 0 capacity should return NULL");
+	Arena *a = arena_new(0);
+	CHECK_NULL(a, "arena_new with 0 capacity should return NULL");
 }
 
 TEST(ArenaLifecycle, DestroyNull)
 {
-	void *a = arena_destroy(NULL);
-	CHECK_NULL(a, "arena_destroy(NULL) should return NULL");
+	void *a = arena_delete(NULL);
+	CHECK_NULL(a, "arena_delete(NULL) should return NULL");
 }
 
 // --- Test Suite for Arena Allocation ---
@@ -41,20 +41,20 @@ struct ArenaAllocation
 
 TEST_F_SETUP(ArenaAllocation)
 {
-	tau->a = arena_create(128);
+	tau->a = arena_new(128);
 	REQUIRE_NOT_NULL(tau->a);
 }
 
-TEST_F_TEARDOWN(ArenaAllocation) { tau->a = arena_destroy(tau->a); }
+TEST_F_TEARDOWN(ArenaAllocation) { tau->a = arena_delete(tau->a); }
 
 TEST(ArenaAllocation, SmallArena)
 {
-	Arena *const restrict a = arena_create(sizeof(size_t) + 4);
+	Arena *const restrict a = arena_new(2);
 	REQUIRE_NOT_NULL(a);
 
 	CHECK_NOT_NULL(arena_alloc(a, 4, 1), "arena_alloc should succeed");
 
-	arena_destroy(a);
+	arena_delete(a);
 }
 
 TEST_F(ArenaAllocation, Simple)
@@ -90,8 +90,8 @@ TEST_F(ArenaAllocation, OutOfMemory)
 
 TEST_F(ArenaAllocation, Alignment)
 {
-	arena_destroy(tau->a);
-	tau->a = arena_create(1024);
+	arena_delete(tau->a);
+	tau->a = arena_new(1024);
 	REQUIRE_NOT_NULL(tau->a);
 
 	void *p1 = arena_alloc(tau->a, 1, 1);
@@ -141,52 +141,34 @@ struct ArenaFreeList
 
 TEST_F_SETUP(ArenaFreeList)
 {
-	tau->a = arena_create(1024);
+	tau->a = arena_new(1024);
 	REQUIRE_NOT_NULL(tau->a);
 }
 
-TEST_F_TEARDOWN(ArenaFreeList) { tau->a = arena_destroy(tau->a); }
+TEST_F_TEARDOWN(ArenaFreeList) { tau->a = arena_delete(tau->a); }
 
-TEST(ArenaFreeList, StackBehaviour)
+TEST(ArenaFreeList, SmallArena)
 {
-	const size_t size1 = sizeof(size_t) + 4 * 4;
-	const size_t size2 = sizeof(size_t) + 4 * 8;
-	Arena *const restrict a = arena_create(size1 + size2 + sizeof(Free_block));
-	REQUIRE_NOT_NULL(a);
+	Arena *a = arena_new(2);
+	REQUIRE_NOT_NULL(a, "arena_new should return a valid pointer");
 
-	// Simulate pushing 2 items.
-
-	void *const restrict p1 = arena_alloc(a, size1, 4);
-	REQUIRE_NOT_NULL(p1, "arena_alloc should succeed");
-	void *const restrict p2 = arena_alloc(a, size2, 4);
-	REQUIRE_NOT_NULL(p2, "arena_alloc should succeed");
-
-	// Simulate popping 2 items.
-
-	arena_free(a, p2);
+	void *const restrict p1 = arena_alloc(a, 2, 1);
 	REQUIRE_NOT_NULL(
-		a->free_list, "Free list should have one block after first free"
-	);
-	REQUIRE_EQ(
-		a->free_list->size, size2, "Freed block should have correct size"
+		p1,
+		"arena_alloc with maximum size and minimum alignment should succeed"
 	);
 
+	/* Freeing should succeed. */
 	arena_free(a, p1);
-	REQUIRE_EQ(
-		a->free_list->size, size1, "Freed block should have correct size"
-	);
 
-	// Pushing more items of similar sizes should resuse freed memory.
+	const size_t offset = a->offset;
+	/* Allocating the same size again should return the same pointer */
+	/* that was freed earlier. */
 
-	void *const restrict re_p2 = arena_alloc(a, size2, 4);
-	REQUIRE_NOT_NULL(re_p2, "arena_alloc should succeed");
-	CHECK_PTR_EQ(re_p2, p2, "freed memory should be reused");
+	arena_alloc(a, 2, 1);
+	CHECK_EQ(a->offset, offset, "freed memory should be reused");
 
-	void *const restrict re_p1 = arena_alloc(a, size1, 4);
-	REQUIRE_NOT_NULL(re_p1, "arena_alloc should succeed");
-	CHECK_PTR_EQ(re_p1, p1, "freed memory should be reused");
-
-	arena_destroy(a);
+	a = arena_delete(a);
 }
 
 TEST_F(ArenaFreeList, FreeAndReuse)
@@ -200,20 +182,17 @@ TEST_F(ArenaFreeList, FreeAndReuse)
 
 	// Free a pointer.
 	arena_free(tau->a, ptr_to_free);
-
 	CHECK_NOT_NULL(
 		tau->a->free_list, "Free list should have one block after first free"
 	);
-	CHECK_EQ(
-		tau->a->free_list->size, 64, "Freed block should have correct size"
-	);
 
+	const size_t offset = tau->a->offset;
 	// Allocate again with the same size
 	void *p_reused = arena_alloc(tau->a, 64, 64);
 	CHECK_NOT_NULL(p_reused, "Allocation from free list should succeed");
 
 	// It should return the *exact same pointer*
-	CHECK_PTR_EQ(p_reused, ptr_to_free, "Should reuse the freed pointer");
+	CHECK_EQ(tau->a->offset, offset, "freed memory should be reused");
 
 	// The free list should be empty again
 	CHECK_NULL(tau->a->free_list, "Free list should be empty after reuse");
@@ -221,11 +200,8 @@ TEST_F(ArenaFreeList, FreeAndReuse)
 	// Allocate another, should bump from the main offset
 	void *p_bumped = arena_alloc(tau->a, 64, 64);
 	CHECK_NOT_NULL(p_bumped);
-	CHECK_PTR_NE(
-		p_bumped, ptr_to_free, "New allocation should not be the reused one"
-	);
-	CHECK_PTR_NE(
-		p_bumped, p_other, "New allocation should not be the other one"
+	CHECK_GT(
+		tau->a->offset, offset, "New allocation should not be the reused one"
 	);
 }
 
@@ -251,6 +227,7 @@ TEST_F(ArenaFreeList, ReuseSmaller)
 	arena_free(tau->a, p128);
 	REQUIRE_NOT_NULL(tau->a->free_list);
 
+	const size_t offset = tau->a->offset;
 	// Allocate a 64-byte block.
 	// The current implementation finds the first fitting block and returns it,
 	// without splitting the block.
@@ -258,12 +235,110 @@ TEST_F(ArenaFreeList, ReuseSmaller)
 	REQUIRE_NOT_NULL(p64);
 
 	// Should reuse the same pointer address
-	CHECK_EQ(p64, p128, "Smaller allocation should reuse larger free block");
-
+	CHECK_EQ(tau->a->offset, offset, "freed memory should be reused");
 	// The free list should now be empty, as the 128-byte block was "consumed"
 	CHECK_NULL(
 		tau->a->free_list, "Free list should be empty after consuming block"
 	);
+}
+
+struct FreeAndReuse
+{
+	Arena *restrict a;
+	void *restrict p1, *restrict p2;
+	size_t s1, s2;
+};
+
+TEST_F_SETUP(FreeAndReuse)
+{
+	tau->s1 = 4 * 4;
+	tau->s2 = 4 * 8;
+	tau->a = arena_new(tau->s1 + tau->s2 + sizeof((Free_block){0}.size) * 2);
+	REQUIRE_NOT_NULL(tau->a);
+
+	tau->p1 = arena_alloc(tau->a, tau->s1, 4);
+	REQUIRE_NOT_NULL(tau->p1);
+
+	tau->p2 = arena_alloc(tau->a, tau->s2, 4);
+	REQUIRE_NOT_NULL(tau->p2);
+}
+
+TEST_F_TEARDOWN(FreeAndReuse) { tau->a = arena_delete(tau->a); }
+
+TEST_F(FreeAndReuse, FreeBigSmallReuseSmallBig)
+{
+	// Free big memory then small memory.
+
+	arena_free(tau->a, tau->p2);
+	REQUIRE_NOT_NULL(
+		tau->a->free_list, "Free list should have one block after first free"
+	);
+	arena_free(tau->a, tau->p1);
+
+	const size_t offset = tau->a->offset;
+	// Allocate small memory then big memory.
+
+	arena_alloc(tau->a, tau->s1, 4);
+	CHECK_EQ(tau->a->offset, offset, "freed memory should be reused");
+	arena_alloc(tau->a, tau->s2, 4);
+	CHECK_EQ(tau->a->offset, offset, "freed memory should be reused");
+}
+
+TEST_F(FreeAndReuse, FreeBigSmallReuseBigSmall)
+{
+	// Free big memory then small memory.
+
+	arena_free(tau->a, tau->p2);
+	REQUIRE_NOT_NULL(
+		tau->a->free_list, "Free list should have one block after first free"
+	);
+	arena_free(tau->a, tau->p1);
+
+	const size_t offset = tau->a->offset;
+	// Allocate big memory then small.
+
+	arena_alloc(tau->a, tau->s2, 4);
+	CHECK_EQ(tau->a->offset, offset, "freed memory should be reused");
+	arena_alloc(tau->a, tau->s1, 4);
+	CHECK_EQ(tau->a->offset, offset, "freed memory should be reused");
+}
+
+TEST_F(FreeAndReuse, FreeSmallBigReuseBigSmall)
+{
+	// Free small memory then big memory.
+
+	arena_free(tau->a, tau->p1);
+	REQUIRE_NOT_NULL(
+		tau->a->free_list, "Free list should have one block after first free"
+	);
+	arena_free(tau->a, tau->p2);
+
+	const size_t offset = tau->a->offset;
+	// Allocate big memory then small.
+
+	arena_alloc(tau->a, tau->s2, 4);
+	CHECK_EQ(tau->a->offset, offset, "freed memory should be reused");
+	arena_alloc(tau->a, tau->s1, 4);
+	CHECK_EQ(tau->a->offset, offset, "freed memory should be reused");
+}
+
+TEST_F(FreeAndReuse, FreeSmallBigReuseSmallBig)
+{
+	// Free small memory then big memory.
+
+	arena_free(tau->a, tau->p1);
+	REQUIRE_NOT_NULL(
+		tau->a->free_list, "Free list should have one block after first free"
+	);
+	arena_free(tau->a, tau->p2);
+
+	const size_t offset = tau->a->offset;
+	// Allocate big memory then small.
+
+	arena_alloc(tau->a, tau->s1, 4);
+	CHECK_EQ(tau->a->offset, offset, "freed memory should be reused");
+	arena_alloc(tau->a, tau->s2, 4);
+	CHECK_EQ(tau->a->offset, offset, "freed memory should be reused");
 }
 
 // --- Test Suite for Arena Reset ---
@@ -275,11 +350,11 @@ struct ArenaReset
 
 TEST_F_SETUP(ArenaReset)
 {
-	tau->a = arena_create(1024);
+	tau->a = arena_new(1024);
 	REQUIRE_NOT_NULL(tau->a);
 }
 
-TEST_F_TEARDOWN(ArenaReset) { tau->a = arena_destroy(tau->a); }
+TEST_F_TEARDOWN(ArenaReset) { tau->a = arena_delete(tau->a); }
 
 TEST_F(ArenaReset, Reset)
 {

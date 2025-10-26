@@ -13,7 +13,7 @@ INCLUDE_DIRS := $(SRCS_DIR)
 SHARED_LIB := lib$(PROJECT_NAME).so
 STATIC_LIB := lib$(PROJECT_NAME).a
 
-SRCS = $(wildcard $(SRCS_DIR)/*.c)
+SRCS = $(SRCS_DIR)/arena.c
 OBJS = $(SRCS:$(SRCS_DIR)/%.c=$(OBJS_DIR)/%.o)
 TESTS = $(wildcard $(TESTS_DIR)/test_*.c)
 TESTS_OBJS = $(TESTS:$(TESTS_DIR)/%.c=$(TESTS_OBJ_DIR)/%.o)
