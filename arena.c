@@ -84,24 +84,39 @@ Arena *arena_new(size_t capacity)
 	/* The `Arena` should be able to store an array of atleast one `Free_block`. */
 	/* This ensures a new `Arena` can fulfil a request for a memory block of the */
 	/* size of the original initialising capacity. */
-	capacity = align_up(capacity, _alignof(Free_block));
-	if (capacity < sizeof(Free_block))
-		capacity = sizeof(Free_block);
+	capacity += sizeof((Free_block){0}.size);
+	if (capacity < sizeof(Free_block) - sizeof((Free_block){0}.size))
+		capacity = sizeof(Free_block) - sizeof((Free_block){0}.size);
 
-	Arena *const restrict arena = malloc(sizeof(Arena) + capacity);
-	if (arena)
-	{
-		*arena = (Arena){
-			.capacity = capacity,
-			.base = (u8 *)arena + sizeof(*arena),
-		};
-	}
+	capacity = align_up(capacity + sizeof(Arena), _alignof(Free_block));
+	return (arena_new_at(malloc(capacity), capacity));
+}
 
+/*!
+ * @brief initialise a new Arena inside a given memory block.
+ *
+ * @param mem non-null pointer to a the memory block to use.
+ * @param size size of the memory block, must be large enough to hold an
+ * `Arena` and a `Free_block` struct.
+ * @returns pointer to the new arena.
+ */
+Arena *arena_new_at(unsigned char *const mem, const size_t size)
+{
+	if (!mem || size <= sizeof(Arena))
+		return (NULL);
+
+	Arena *const arena = (Arena *)mem;
+
+	if (size - sizeof(*arena) < sizeof(Free_block))
+		return (NULL);
+
+	*arena = (Arena){.capacity = size - sizeof(*arena)};
+	arena->top = arena->base;
 	return (arena);
 }
 
 /*!
- * @brief reset the bump pointer of the arena to 0.
+ * @brief reset the top of the arena to the base.
  *
  * @param arena non-null pointer to the arena.
  */
@@ -109,7 +124,7 @@ void arena_reset(Arena *const restrict arena)
 {
 	if (arena)
 	{
-		arena->offset = 0;
+		arena->top = arena->base;
 #if defined ENABLE_FREE_LIST || defined ENABLE_SIZE_CLASSES
 		memset((void *)arena->blocks, 0, sizeof(arena->blocks));
 #endif /* defined ENABLE_FREE_LIST || defined ENABLE_SIZE_CLASSES */
@@ -122,19 +137,18 @@ void arena_reset(Arena *const restrict arena)
 }
 
 #ifdef ENABLE_SIZE_CLASSES
-static Free_block *restrict *
-size_class_index(Arena *const restrict arena, const size_t size)
+static size_t size_class_index(const size_t size)
 {
 	size_t i = 0;
-	while (i < ARRAY_LEN(ARENA_SIZE_CLASSES))
+	while (i < ARRAY_LEN(FREE_BLOCKS_SIZES))
 	{
-		if (size > ARENA_SIZE_CLASSES[i] && arena->blocks[i])
+		if (size <= FREE_BLOCKS_SIZES[i])
 			break;
 
 		i++;
 	}
 
-	return (&arena->blocks[i]);
+	return (i);
 }
 #endif /* ENABLE_SIZE_CLASSES */
 
@@ -151,15 +165,17 @@ static Free_block *fb_search(
 {
 	assert(IS_POWER2(alignment));
 #if defined ENABLE_FREE_LIST
-	Free_block *restrict *restrict prev = &arena->blocks;
+	Free_block *restrict *prev = &arena->blocks;
 #elif defined ENABLE_SIZE_CLASSES
-	Free_block *restrict *restrict prev = size_class_index(arena, size);
+	for (size_t i = size_class_index(size); i < ARRAY_LEN(arena->blocks); i++)
+	{
+		Free_block *restrict *restrict prev = &arena->blocks[i];
 #endif /* ENABLE_FREE_LIST */
 
 	for (Free_block *block = *prev; block; block = block->next)
 	{
 		const size_t bs = block->size;
-		u8 *const restrict mem = (u8 *)block + sizeof(block->size);
+		u8 *const mem = (u8 *)block + sizeof(block->size);
 		if (bs >= size + alignment - 1 ||
 			(bs >= size && (size_t)(&mem[block->size] -
 									align_up((size_t)mem, alignment)) >= size))
@@ -170,8 +186,11 @@ static Free_block *fb_search(
 
 		prev = &block->next;
 	}
+#ifdef ENABLE_SIZE_CLASSES
+}
+#endif /* ENABLE_SIZE_CLASSES */
 
-	return (NULL);
+return (NULL);
 }
 
 /*!
@@ -205,33 +224,31 @@ arena_alloc(Arena *const restrict arena, size_t size, const size_t alignment)
 		);
 	}
 
-	/* Otherwise, allocate from bump pointer. */
+	/* Otherwise, allocate from the top of the Arena. */
 
-	/* Only allocate in Aligned chunks of `Free_block`. */
-	size = align_up(size, alignof_fb);
-	if (size < sizeof(block))
-		size = sizeof(block);
+	if (size < sizeof(Free_block) - sizeof(block->size))
+		size = sizeof(Free_block) - sizeof(block->size);
 
-	u8 *const restrict current = arena->base + arena->offset;
 	/* Align memory and leave some space before the memory to store the size. */
-	u8 *const restrict aligned = (u8 *)align_up(
-		(size_t)current + alignof_fb,
+	const size_t aligned = align_up(
+		(size_t)arena->top + sizeof(block->size),
 		alignof_fb > alignment ? alignof_fb : alignment
 	);
-	const size_t new_offset = (size_t)aligned + size - (size_t)arena->base;
+	/* top should always be aligned for a `Free_block` type. */
+	u8 *const new_top = (u8 *)align_up(aligned + size, alignof_fb);
 
-	if (new_offset > arena->capacity)
+	if (new_top > &arena->base[arena->capacity])
 		return (NULL);  // out of memory
 
-	/* Zero out the memory between the current position of the bump pointer */
-	/* and the start of the mem to be returned. */
-	block = (Free_block *)memset(current, 0, aligned - current);
-	/* The first 8 (sizeof(size_t)) bytes after the bump pointer store the */
-	/* offset to the new position of the bump pointer, excluding the 8 bytes. */
-	/* This position will also double as space for the `Free_block` struct */
-	/* when this allocation is freed. */
-	block->size = new_offset - (arena->offset + sizeof(block->size));
-	arena->offset = new_offset;
+	/* Zero out the memory between the current position of the top and the */
+	/* start of the mem to be returned. */
+	block = (Free_block *)memset(arena->top, 0, aligned - (size_t)arena->top);
+	/* The first 8 (sizeof(Free_block.size)) bytes after the arena top store */
+	/* the offset to the new position of the top, excluding the 8 bytes. */
+	/* This position will also serve as the beginning of the `Free_block` */
+	/* struct when this allocation is freed. */
+	block->size = new_top - &arena->top[sizeof(block->size)];
+	arena->top = new_top;
 #if defined(ENABLE_ARENA_STATS)
 	arena->num_allocs++;
 	arena->bytes_used += block->size;
@@ -240,32 +257,52 @@ arena_alloc(Arena *const restrict arena, size_t size, const size_t alignment)
 }
 
 /*!
+ * @brief allocate an arena nested within a new arena.
+ *
+ * @param arena pointer to the parent arena.
+ * @param capacity positive non-zero capacity in bytes of the new arena.
+ * @returns pointer to the new arena, NULL on error.
+ */
+Arena *arena_nest(Arena *const arena, size_t capacity)
+{
+	if (!arena || capacity < 1)
+		return (NULL);
+
+	capacity += sizeof(*arena) + sizeof((Free_block){0}.size);
+	capacity = align_up(capacity, _alignof(Free_block));
+	return (
+		arena_new_at(arena_alloc(arena, capacity, _alignof(Arena)), capacity)
+	);
+}
+
+/*!
  * @brief search for the true beginning of the memory block.
  *
  * @param ptr where to start searching from.
  *
- * The first 8 bytes (sizeof(size_t)) of the block should have the size of
+ * The first 8 bytes (sizeof(Free_block.size)) of the block should have the size of
  * the block, every byte in between there and `ptr` should be zeroed.
  *
  * @returns pointer to the start of the `Free_block`.
  */
-static Free_block *fb_start_address(u8 *restrict ptr)
+static Free_block *fb_start_address(u8 *ptr)
 {
 	do
 	{
 		ptr--;
 	} while (*ptr == 0);
 
-	return ((Free_block *)align_down((size_t)ptr, sizeof(size_t)));
+	return ((Free_block *)align_down((size_t)ptr, alignof(Free_block)));
 }
 
 static void
 fb_insert(Arena *const restrict arena, Free_block *const restrict block)
 {
 #ifdef ENABLE_FREE_LIST
-	Free_block *restrict *restrict slot = &arena->blocks;
+	Free_block *restrict *slot = &arena->blocks;
 #elif defined ENABLE_SIZE_CLASSES
-	Free_block *restrict *restrict slot = size_class_index(arena, block->size);
+	Free_block *restrict *restrict slot =
+		&arena->blocks[size_class_index(block->size)];
 #endif /* ENABLE_FREE_LIST */
 
 	block->next = *slot;
