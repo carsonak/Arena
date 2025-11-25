@@ -9,8 +9,9 @@
 
 typedef unsigned char u8;
 
-/*! @brief check if a number is a power of 2. */
+/*! check if a number is a power of 2. */
 #define IS_POWER2(n) (((n) & ((n) - 1)) == 0)
+#define ARRAY_LEN(arr) (sizeof(arr) / sizeof(*(arr)))
 
 /*!
  * @brief return the next multiple of the given number starting from a given number.
@@ -57,26 +58,38 @@ static size_t align_down(const size_t n, const size_t alignment)
 /*!
  * @brief deallocate memory of an arena.
  *
+ * @param dealloc pointer to a function that can deallocate memory.
+ * @param dealloc_context additional context for the deallocation function.
  * @param arena pointer to the arena to deallocate.
  * @returns NULL always.
  */
-void *arena_delete(Arena *const restrict arena)
+void *arena_delete(
+	mem_free *const dealloc, void *const restrict dealloc_context,
+	Arena *const restrict arena
+)
 {
 	if (!arena)
 		return (NULL);
 
 	*arena = (Arena){0};
-	free(arena);
+	if (dealloc)
+		dealloc(dealloc_context, arena);
+	else
+		free(arena);
+
 	return (NULL);
 }
 
 /*!
  * @brief allocate an arena of the given capacity.
  *
+ * @param alloc pointer to a function that can allocate memory.
+ * @param alloc_context additional context for the allocation function.
  * @param capacity positive non-zero capacity in bytes of the arena to allocate.
  * @returns pointer to the new arena, NULL on error.
  */
-Arena *arena_new(size_t capacity)
+Arena *
+arena_new(mem_alloc *const alloc, void *const alloc_context, size_t capacity)
 {
 	if (capacity < 1)
 		return (NULL);
@@ -89,7 +102,14 @@ Arena *arena_new(size_t capacity)
 		capacity = sizeof(Free_block) - sizeof((Free_block){0}.size);
 
 	capacity = align_up(capacity + sizeof(Arena), _alignof(Free_block));
-	return (arena_new_at(malloc(capacity), capacity));
+	Arena *arena = NULL;
+
+	if (alloc)
+		arena = arena_new_at(alloc(alloc_context, capacity), capacity);
+	else
+		arena = arena_new_at(malloc(capacity), capacity);
+
+	return (arena);
 }
 
 /*!
@@ -120,23 +140,21 @@ Arena *arena_new_at(unsigned char *const mem, const size_t size)
  *
  * @param arena non-null pointer to the arena.
  */
-void arena_reset(Arena *const restrict arena)
+void arena_reset(Arena *const arena)
 {
 	if (arena)
 	{
 		arena->top = arena->base;
-#if defined ENABLE_FREE_LIST || defined ENABLE_SIZE_CLASSES
 		memset((void *)arena->blocks, 0, sizeof(arena->blocks));
-#endif /* defined ENABLE_FREE_LIST || defined ENABLE_SIZE_CLASSES */
-#if defined(ENABLE_ARENA_STATS)
-		arena->num_allocs = 0;
-		arena->num_frees = 0;
-		arena->bytes_used = 0;
-#endif
 	}
 }
 
-#ifdef ENABLE_SIZE_CLASSES
+/*!
+ * @brief match a given size to an index in the array of size classes.
+ *
+ * @param size the size to classify.
+ * @returns index of the size class.
+ */
 static size_t size_class_index(const size_t size)
 {
 	size_t i = 0;
@@ -150,7 +168,6 @@ static size_t size_class_index(const size_t size)
 
 	return (i);
 }
-#endif /* ENABLE_SIZE_CLASSES */
 
 /*!
  * @brief search for a `Free_block` of atleast the given size.
@@ -159,38 +176,31 @@ static size_t size_class_index(const size_t size)
  * @param size the size to search for.
  * @returns pointer to the first block with a size greater or equal to `size`, NULL otherwise.
  */
-static Free_block *fb_search(
-	Arena *const restrict arena, const size_t size, const size_t alignment
-)
+static Free_block *
+fb_search(Arena *const arena, const size_t size, const size_t alignment)
 {
 	assert(IS_POWER2(alignment));
-#if defined ENABLE_FREE_LIST
-	Free_block *restrict *prev = &arena->blocks;
-#elif defined ENABLE_SIZE_CLASSES
 	for (size_t i = size_class_index(size); i < ARRAY_LEN(arena->blocks); i++)
 	{
-		Free_block *restrict *restrict prev = &arena->blocks[i];
-#endif /* ENABLE_FREE_LIST */
-
-	for (Free_block *block = *prev; block; block = block->next)
-	{
-		const size_t bs = block->size;
-		u8 *const mem = (u8 *)block + sizeof(block->size);
-		if (bs >= size + alignment - 1 ||
-			(bs >= size && (size_t)(&mem[block->size] -
-									align_up((size_t)mem, alignment)) >= size))
+		Free_block *restrict *prev = &arena->blocks[i];
+		for (Free_block *block = *prev; block; block = block->next)
 		{
-			*prev = block->next;
-			return (block);
+			const size_t bs = block->size;
+			u8 *const mem = (u8 *)block + sizeof(block->size);
+			if (bs >= size + alignment - 1 ||
+				(bs >= size &&
+				 (size_t)(&mem[block->size] -
+						  align_up((size_t)mem, alignment)) >= size))
+			{
+				*prev = block->next;
+				return (block);
+			}
+
+			prev = &block->next;
 		}
-
-		prev = &block->next;
 	}
-#ifdef ENABLE_SIZE_CLASSES
-}
-#endif /* ENABLE_SIZE_CLASSES */
 
-return (NULL);
+	return (NULL);
 }
 
 /*!
@@ -203,8 +213,7 @@ return (NULL);
  * @returns an aligned pointer to a memory block atleast `size` bytes,
  * NULL on error.
  */
-void *
-arena_alloc(Arena *const restrict arena, size_t size, const size_t alignment)
+void *arena_alloc(Arena *const arena, size_t size, const size_t alignment)
 {
 	if (!arena || size < 1 || alignment > size || !IS_POWER2(alignment))
 		return (NULL);
@@ -216,9 +225,6 @@ arena_alloc(Arena *const restrict arena, size_t size, const size_t alignment)
 
 	if (block)
 	{
-#if defined(ENABLE_ARENA_STATS)
-		arena->num_allocs++;
-#endif
 		return (
 			(void *)align_up((size_t)block + sizeof(block->size), alignment)
 		);
@@ -249,10 +255,6 @@ arena_alloc(Arena *const restrict arena, size_t size, const size_t alignment)
 	/* struct when this allocation is freed. */
 	block->size = new_top - &arena->top[sizeof(block->size)];
 	arena->top = new_top;
-#if defined(ENABLE_ARENA_STATS)
-	arena->num_allocs++;
-	arena->bytes_used += block->size;
-#endif
 	return ((void *)aligned);
 }
 
@@ -298,12 +300,7 @@ static Free_block *fb_start_address(u8 *ptr)
 static void
 fb_insert(Arena *const restrict arena, Free_block *const restrict block)
 {
-#ifdef ENABLE_FREE_LIST
-	Free_block *restrict *slot = &arena->blocks;
-#elif defined ENABLE_SIZE_CLASSES
-	Free_block *restrict *restrict slot =
-		&arena->blocks[size_class_index(block->size)];
-#endif /* ENABLE_FREE_LIST */
+	Free_block *restrict *slot = &arena->blocks[size_class_index(block->size)];
 
 	block->next = *slot;
 	*slot = block;
@@ -324,9 +321,6 @@ void *arena_free(Arena *const restrict arena, void *const restrict ptr)
 	Free_block *const restrict block = fb_start_address(ptr);
 
 	fb_insert(arena, block);
-#if defined(ENABLE_ARENA_STATS)
-	arena->num_frees++;
-#endif
 	return (NULL);
 }
 

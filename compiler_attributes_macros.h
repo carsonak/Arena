@@ -51,6 +51,10 @@
 
 #if _has_attribute(access)
 	/*!
+	 * @brief same as `_access_arr`, but for pointers to only one object.
+	 */
+	#define _access(mode, ptr_pos) __attribute__((access(mode, ptr_pos)))
+	/*!
 	 * @brief enables the detection of invalid or unsafe accesses by functions
 	 * or their callers, as well as write-only accesses to objects that are
 	 * never read from.
@@ -62,10 +66,6 @@
 	 */
 	#define _access_arr(mode, ptr_pos, size_ptr)                              \
 		__attribute__((access(mode, ptr_pos, size_ptr)))
-	/*!
-	 * @brief same as `_access_arr`, but for pointers to only one object.
-	 */
-	#define _access(mode, ptr_pos) __attribute__((access(mode, ptr_pos)))
 #else
 	#define _access(mode, pos)
 	#define _access_arr(mode, pos, size)
@@ -118,10 +118,10 @@
 	/**
 	 * @brief specifies that a function takes printf/scanf/strftime/strfmon style arguments.
 	 *
-	 * @archetype: determines how the format string is interpreted.
+	 * @param archetype determines how the format string is interpreted.
 	 * Valid archetypes include printf, scanf, strftime or strfmon.
-	 * @string_position: parameter position, counting from 1, of the format string.
-	 * @va_position: parameter position of the first variadic argument.
+	 * @param string_position parameter position, counting from 1, of the format string.
+	 * @param va_position parameter position of the first variadic argument.
 	 */
 	#define _format(archetype, string_position, va_position)                  \
 		__attribute__((format(archetype, string_position, va_position)))
@@ -178,20 +178,5 @@
 	#define _nonnull
 	#define _nonnull_pos(...)
 #endif  // _has_attribute(nonnull)
-
-#if _has_attribute(format)
-	/**
-	 * @brief specifies that a function takes printf/scanf/strftime/strfmon style arguments.
-	 *
-	 * @param archetype determines how the format string is interpreted.
-	 * Valid archetypes include printf, scanf, strftime or strfmon.
-	 * @param string_position parameter position, counting from 1, of the format string.
-	 * @param va_position parameter position of the first variadic argument.
-	 */
-	#define _format(archetype, string_position, va_position)                  \
-		__attribute__((format(archetype, string_position, va_position)))
-#else
-	#define _format(archetype, string_position, va_position)
-#endif  // _has_attribute(format)
 
 #endif  // COMPILER_ATTRIBUTES_MACROS_H

@@ -20,23 +20,23 @@ TAU_MAIN()
 
 TEST(ArenaLifecycle, CreateAndDestroy)
 {
-	Arena *a = arena_new(1024);
+	Arena *a = arena_new(NULL, NULL, 1024);
 	REQUIRE_NOT_NULL(a, "arena_new should return a valid pointer");
 
-	a = arena_delete(a);
+	a = arena_delete(NULL, NULL, a);
 	CHECK_NULL(a, "arena_delete should return NULL");
 }
 
 TEST(ArenaLifecycle, CreateInvalid)
 {
-	Arena *a = arena_new(0);
+	Arena *a = arena_new(NULL, NULL, 0);
 	CHECK_NULL(a, "arena_new with 0 capacity should return NULL");
 }
 
 TEST(ArenaLifecycle, DestroyNull)
 {
-	void *a = arena_delete(NULL);
-	CHECK_NULL(a, "arena_delete(NULL) should return NULL");
+	void *a = arena_delete(NULL, NULL, NULL);
+	CHECK_NULL(a, "arena_delete() should return NULL");
 }
 
 // --- Test Suite for Arena Allocation ---
@@ -48,20 +48,20 @@ struct ArenaAllocation
 
 TEST_F_SETUP(ArenaAllocation)
 {
-	tau->a = arena_new(128);
+	tau->a = arena_new(NULL, NULL, 128);
 	REQUIRE_NOT_NULL(tau->a);
 }
 
-TEST_F_TEARDOWN(ArenaAllocation) { tau->a = arena_delete(tau->a); }
+TEST_F_TEARDOWN(ArenaAllocation) { tau->a = arena_delete(NULL, NULL, tau->a); }
 
 TEST(ArenaAllocation, SmallArena)
 {
-	Arena *const restrict a = arena_new(2);
+	Arena *const restrict a = arena_new(NULL, NULL, 2);
 	REQUIRE_NOT_NULL(a);
 
 	CHECK_NOT_NULL(arena_alloc(a, 4, 1), "arena_alloc should succeed");
 
-	arena_delete(a);
+	arena_delete(NULL, NULL, a);
 }
 
 TEST_F(ArenaAllocation, Simple)
@@ -97,8 +97,8 @@ TEST_F(ArenaAllocation, OutOfMemory)
 
 TEST_F(ArenaAllocation, Alignment)
 {
-	arena_delete(tau->a);
-	tau->a = arena_new(1024);
+	arena_delete(NULL, NULL, tau->a);
+	tau->a = arena_new(NULL, NULL, 1024);
 	REQUIRE_NOT_NULL(tau->a);
 
 	void *p1 = arena_alloc(tau->a, 1, 1);
@@ -148,15 +148,15 @@ struct ArenaFreeList
 
 TEST_F_SETUP(ArenaFreeList)
 {
-	tau->a = arena_new(1024);
+	tau->a = arena_new(NULL, NULL, 1024);
 	REQUIRE_NOT_NULL(tau->a);
 }
 
-TEST_F_TEARDOWN(ArenaFreeList) { tau->a = arena_delete(tau->a); }
+TEST_F_TEARDOWN(ArenaFreeList) { tau->a = arena_delete(NULL, NULL, tau->a); }
 
 TEST(ArenaFreeList, SmallArena)
 {
-	Arena *a = arena_new(2);
+	Arena *a = arena_new(NULL, NULL, 2);
 	REQUIRE_NOT_NULL(a, "arena_new should return a valid pointer");
 
 	void *const restrict p1 = arena_alloc(a, 2, 1);
@@ -175,7 +175,7 @@ TEST(ArenaFreeList, SmallArena)
 	arena_alloc(a, 2, 1);
 	CHECK_PTR_EQ(a->top, top, "freed memory should be reused");
 
-	a = arena_delete(a);
+	a = arena_delete(NULL, NULL, a);
 }
 
 TEST_F(ArenaFreeList, FreeAndReuse)
@@ -269,7 +269,9 @@ TEST_F_SETUP(FreeAndReuse)
 {
 	tau->s1 = 4 * 4;
 	tau->s2 = 4 * 8;
-	tau->a = arena_new(tau->s1 + tau->s2 + sizeof((Free_block){0}.size) * 2);
+	tau->a = arena_new(
+		NULL, NULL, tau->s1 + tau->s2 + sizeof((Free_block){0}.size) * 2
+	);
 	REQUIRE_NOT_NULL(tau->a);
 
 	tau->p1 = arena_alloc(tau->a, tau->s1, 4);
@@ -279,7 +281,7 @@ TEST_F_SETUP(FreeAndReuse)
 	REQUIRE_NOT_NULL(tau->p2);
 }
 
-TEST_F_TEARDOWN(FreeAndReuse) { tau->a = arena_delete(tau->a); }
+TEST_F_TEARDOWN(FreeAndReuse) { tau->a = arena_delete(NULL, NULL, tau->a); }
 
 TEST_F(FreeAndReuse, FreeBigSmallReuseSmallBig)
 {
@@ -372,11 +374,13 @@ const char hello[] = "Hello World!";
 
 TEST_F_SETUP(ArenaNest)
 {
-	tau->a = arena_new((sizeof(Arena) + sizeof(size_t)) * 2 + sizeof(hello));
+	tau->a = arena_new(
+		NULL, NULL, (sizeof(Arena) + sizeof(size_t)) * 2 + sizeof(hello)
+	);
 	REQUIRE_NOT_NULL(tau->a);
 }
 
-TEST_F_TEARDOWN(ArenaNest) { tau->a = arena_delete(tau->a); }
+TEST_F_TEARDOWN(ArenaNest) { tau->a = arena_delete(NULL, NULL, tau->a); }
 
 TEST_F(ArenaNest, NestTight)
 {
@@ -405,11 +409,11 @@ struct ArenaReset
 
 TEST_F_SETUP(ArenaReset)
 {
-	tau->a = arena_new(1024);
+	tau->a = arena_new(NULL, NULL, 1024);
 	REQUIRE_NOT_NULL(tau->a);
 }
 
-TEST_F_TEARDOWN(ArenaReset) { tau->a = arena_delete(tau->a); }
+TEST_F_TEARDOWN(ArenaReset) { tau->a = arena_delete(NULL, NULL, tau->a); }
 
 TEST_F(ArenaReset, Reset)
 {

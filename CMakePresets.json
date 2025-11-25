@@ -1,0 +1,76 @@
+{
+    "version": 7,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 27
+    },
+    "configurePresets": [
+        {
+            "name": "configure-base",
+            "hidden": true,
+            "cacheVariables": { "CMAKE_EXPORT_COMPILE_COMMANDS": true },
+            "warnings": { "dev": true }
+        },
+        {
+            "name": "debug",
+            "inherits": ["configure-base"],
+            "binaryDir": "debug",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+        },
+        {
+            "name": "release",
+            "inherits": ["configure-base"],
+            "binaryDir": "release",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" },
+            "warnings": { "dev": false }
+        },
+        {
+            "name": "release-debug",
+            "inherits": ["configure-base"],
+            "binaryDir": "release-debug",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "debug",
+            "description": "Code-Compile-Debug",
+            "configurePreset": "debug",
+            "configuration": "Debug"
+        },
+        {
+            "name": "release",
+            "configurePreset": "release",
+            "configuration": "Release"
+        },
+        {
+            "name": "release-debug",
+            "description": "Code-Compile-Debug",
+            "configurePreset": "release-debug",
+            "configuration": "RelWithDebInfo"
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "tests-base",
+            "hidden": true,
+            "output": { "outputOnFailure": true },
+            "execution": { "stopOnFailure": true, "scheduleRandom": true }
+        },
+        {
+            "name": "debug",
+            "inherits": ["tests-base"],
+            "configurePreset": "debug"
+        },
+        {
+            "name": "release",
+            "inherits": ["tests-base"],
+            "configurePreset": "release"
+        },
+        {
+            "name": "release-debug",
+            "inherits": ["tests-base"],
+            "configurePreset": "release-debug"
+        }
+    ]
+}
