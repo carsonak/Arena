@@ -3,7 +3,12 @@
 
 #include <stddef.h>  // size_t
 
+#include "common_callback_types.h"
+
 #define ARRAY_LEN(arr) (sizeof(arr) / sizeof(*(arr)))
+
+/*! Minimum size of a `Field` in the arena, defaults to 256MB. */
+extern size_t MINIMUM_FIELD_SIZE;
 
 /*! size categories of freed blocks in an Arena. */
 static const unsigned int FREE_BLOCKS_SIZES[] = {
@@ -16,14 +21,10 @@ static const unsigned int FREE_BLOCKS_SIZES[] = {
  */
 struct Arena
 {
-	/*! @public total memory in bytes the arena holds. */
-	size_t capacity;
-	/*! @private start of untouched memory in the arena. */
-	unsigned char *restrict top;
+	/*! @private pointer to the top of the stack of fields. */
+	struct Field *restrict head;
 	/*! @private array of linked lists of freed blocks of memory. */
 	struct Free_block *restrict blocks[ARRAY_LEN(FREE_BLOCKS_SIZES) + 1];
-	/*! @private start of the memory in the arena. */
-	unsigned char base[];
 };
 
 #undef ARRAY_LEN
