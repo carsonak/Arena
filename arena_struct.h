@@ -5,17 +5,6 @@
 
 #define ARRAY_LEN(arr) (sizeof(arr) / sizeof(*(arr)))
 
-/*!
- * @brief node of a linked list of free blocks in an arena.
- */
-typedef struct Free_block
-{
-	/*! size in bytes of the memory block. */
-	size_t size;
-	/*! pointer to the next free memory block. */
-	struct Free_block *restrict next;
-} Free_block;
-
 /*! size categories of freed blocks in an Arena. */
 static const unsigned int FREE_BLOCKS_SIZES[] = {
 	2 << 4,  2 << 5,  2 << 6,  2 << 7,  2 << 8,  2 << 9,  2 << 10, 2 << 11,
@@ -32,7 +21,7 @@ struct Arena
 	/*! @private start of untouched memory in the arena. */
 	unsigned char *restrict top;
 	/*! @private array of linked lists of freed blocks of memory. */
-	Free_block *restrict blocks[ARRAY_LEN(FREE_BLOCKS_SIZES) + 1];
+	struct Free_block *restrict blocks[ARRAY_LEN(FREE_BLOCKS_SIZES) + 1];
 	/*! @private start of the memory in the arena. */
 	unsigned char base[];
 };

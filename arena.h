@@ -23,8 +23,8 @@ Arena *arena_nest(Arena *const arena, size_t capacity) _malloc;
 
 void *arena_free(Arena *const restrict arena, void *const restrict ptr);
 void *arena_alloc(
-	Arena *const restrict arena, size_t size, const size_t alignment
+	Arena *const arena, size_t size, const size_t alignment
 ) _malloc _alloc_size(2);
-void arena_reset(Arena *const restrict arena);
+void arena_reset(Arena *const arena);
 
 #endif /* ARENA_H */

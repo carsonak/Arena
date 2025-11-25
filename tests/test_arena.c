@@ -269,9 +269,7 @@ TEST_F_SETUP(FreeAndReuse)
 {
 	tau->s1 = 4 * 4;
 	tau->s2 = 4 * 8;
-	tau->a = arena_new(
-		NULL, NULL, tau->s1 + tau->s2 + sizeof((Free_block){0}.size) * 2
-	);
+	tau->a = arena_new(NULL, NULL, tau->s1 + tau->s2 + sizeof(size_t) * 2);
 	REQUIRE_NOT_NULL(tau->a);
 
 	tau->p1 = arena_alloc(tau->a, tau->s1, 4);

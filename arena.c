@@ -7,11 +7,36 @@
 #include "arena_struct.h"
 #include "compiler_attributes_macros.h"
 
+/*************************************** TYPES ****************************************/
+
 typedef unsigned char u8;
+
+/*!
+ * @brief node of a linked list of free blocks in an arena.
+ */
+typedef struct Free_block
+{
+	/*! size in bytes of the memory block. */
+	size_t size;
+	/*! pointer to the next free memory block. */
+	struct Free_block *restrict next;
+} Free_block;
+
+/*************************************** MACROS ****************************************/
 
 /*! check if a number is a power of 2. */
 #define IS_POWER2(n) (((n) & ((n) - 1)) == 0)
 #define ARRAY_LEN(arr) (sizeof(arr) / sizeof(*(arr)))
+
+/*********************************** STATIC FUNCTIONS **********************************/
+
+static Free_block *fb_search(
+	Arena *const arena, const size_t size, const size_t alignment
+) _nonnull;
+static Free_block *fb_start_address(u8 *ptr) _nonnull;
+static void fb_insert(
+	Arena *const restrict arena, Free_block *const restrict block
+) _nonnull;
 
 /*!
  * @brief return the next multiple of the given number starting from a given number.
@@ -54,6 +79,91 @@ static size_t align_down(const size_t n, const size_t alignment)
 
 	return (n & ~(alignment - 1));
 }
+
+/*!
+ * @brief match a given size to an index in the array of size classes.
+ *
+ * @param size the size to classify.
+ * @returns index of the size class.
+ */
+static size_t size_class_index(const size_t size)
+{
+	size_t i = 0;
+	while (i < ARRAY_LEN(FREE_BLOCKS_SIZES))
+	{
+		if (size <= FREE_BLOCKS_SIZES[i])
+			break;
+
+		i++;
+	}
+
+	return (i);
+}
+
+/*!
+ * @brief search for a `Free_block` of atleast the given size.
+ *
+ * @param start address of the pointer to the first `Free_block` to start searching from.
+ * @param size the size to search for.
+ * @returns pointer to the first block with a size greater or equal to `size`, NULL otherwise.
+ */
+static Free_block *
+fb_search(Arena *const arena, const size_t size, const size_t alignment)
+{
+	assert(IS_POWER2(alignment));
+	for (size_t i = size_class_index(size); i < ARRAY_LEN(arena->blocks); i++)
+	{
+		Free_block *restrict *prev = &arena->blocks[i];
+		for (Free_block *block = *prev; block; block = block->next)
+		{
+			const size_t bs = block->size;
+			u8 *const mem = (u8 *)block + sizeof(block->size);
+			if (bs >= size + alignment - 1 ||
+				(bs >= size &&
+				 (size_t)(&mem[block->size] -
+						  align_up((size_t)mem, alignment)) >= size))
+			{
+				*prev = block->next;
+				return (block);
+			}
+
+			prev = &block->next;
+		}
+	}
+
+	return (NULL);
+}
+
+/*!
+ * @brief search for the true beginning of the memory block.
+ *
+ * @param ptr where to start searching from.
+ *
+ * The first 8 bytes (sizeof(Free_block.size)) of the block should have the size of
+ * the block, every byte in between there and `ptr` should be zeroed.
+ *
+ * @returns pointer to the start of the `Free_block`.
+ */
+static Free_block *fb_start_address(u8 *ptr)
+{
+	do
+	{
+		ptr--;
+	} while (*ptr == 0);
+
+	return ((Free_block *)align_down((size_t)ptr, alignof(Free_block)));
+}
+
+static void
+fb_insert(Arena *const restrict arena, Free_block *const restrict block)
+{
+	Free_block *restrict *slot = &arena->blocks[size_class_index(block->size)];
+
+	block->next = *slot;
+	*slot = block;
+}
+
+/***************************************************************************************/
 
 /*!
  * @brief deallocate memory of an arena.
@@ -150,60 +260,6 @@ void arena_reset(Arena *const arena)
 }
 
 /*!
- * @brief match a given size to an index in the array of size classes.
- *
- * @param size the size to classify.
- * @returns index of the size class.
- */
-static size_t size_class_index(const size_t size)
-{
-	size_t i = 0;
-	while (i < ARRAY_LEN(FREE_BLOCKS_SIZES))
-	{
-		if (size <= FREE_BLOCKS_SIZES[i])
-			break;
-
-		i++;
-	}
-
-	return (i);
-}
-
-/*!
- * @brief search for a `Free_block` of atleast the given size.
- *
- * @param start address of the pointer to the first `Free_block` to start searching from.
- * @param size the size to search for.
- * @returns pointer to the first block with a size greater or equal to `size`, NULL otherwise.
- */
-static Free_block *
-fb_search(Arena *const arena, const size_t size, const size_t alignment)
-{
-	assert(IS_POWER2(alignment));
-	for (size_t i = size_class_index(size); i < ARRAY_LEN(arena->blocks); i++)
-	{
-		Free_block *restrict *prev = &arena->blocks[i];
-		for (Free_block *block = *prev; block; block = block->next)
-		{
-			const size_t bs = block->size;
-			u8 *const mem = (u8 *)block + sizeof(block->size);
-			if (bs >= size + alignment - 1 ||
-				(bs >= size &&
-				 (size_t)(&mem[block->size] -
-						  align_up((size_t)mem, alignment)) >= size))
-			{
-				*prev = block->next;
-				return (block);
-			}
-
-			prev = &block->next;
-		}
-	}
-
-	return (NULL);
-}
-
-/*!
  * @brief return pointer to a memory block of a given size and alignment.
  *
  * @param arena non-null pointer to the arena.
@@ -275,35 +331,6 @@ Arena *arena_nest(Arena *const arena, size_t capacity)
 	return (
 		arena_new_at(arena_alloc(arena, capacity, _alignof(Arena)), capacity)
 	);
-}
-
-/*!
- * @brief search for the true beginning of the memory block.
- *
- * @param ptr where to start searching from.
- *
- * The first 8 bytes (sizeof(Free_block.size)) of the block should have the size of
- * the block, every byte in between there and `ptr` should be zeroed.
- *
- * @returns pointer to the start of the `Free_block`.
- */
-static Free_block *fb_start_address(u8 *ptr)
-{
-	do
-	{
-		ptr--;
-	} while (*ptr == 0);
-
-	return ((Free_block *)align_down((size_t)ptr, alignof(Free_block)));
-}
-
-static void
-fb_insert(Arena *const restrict arena, Free_block *const restrict block)
-{
-	Free_block *restrict *slot = &arena->blocks[size_class_index(block->size)];
-
-	block->next = *slot;
-	*slot = block;
 }
 
 /*!
