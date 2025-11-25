@@ -1,6 +1,6 @@
 # build files
 bin/
 obj/
-release/*
-release-debug/*
-debug/*
+release/
+release-debug/
+debug/
