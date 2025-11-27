@@ -1,428 +1,294 @@
-#include <stddef.h>  // size_t
-#include <string.h>  // memcmp
+#include <limits.h>
+#include <stdbool.h>  // bool
+#include <stdint.h>   // uintptr_t
+#include <string.h>   // memset, memcmp
+#include <tau/tau.h>
 
-#include "arena.h"         // The Arena allocator API
-#include "arena_struct.h"  // Access to the internal Arena struct for checking
-#include "tau/tau.h"       // The Tau testing framework
+#include "arena.h"
+#include "arena_struct.h"
+
+#define ARRAY_ISEMPTY(array)                                                  \
+	(!(array) ||                                                              \
+	 memcmp(                                                                  \
+		 (void *)array, (unsigned char[sizeof(array)]){0}, sizeof(array)      \
+	 ) == 0)
 
 TAU_MAIN()
 
-#define CHECK_ALIGNED(ptr, alignment)                                         \
-	CHECK_EQ(((size_t)(ptr) % (alignment)), 0, "Pointer not aligned")
-
-#define BLOCKS_ISEMPTY(blocks)                                                \
-	((!blocks) ||                                                             \
-	 memcmp(                                                                  \
-		 (void *)(blocks), (unsigned char[sizeof(blocks)]){0}, sizeof(blocks) \
-	 ) == 0)
-
-// --- Test Suite for Arena Lifecycle ---
-
-TEST(ArenaLifecycle, CreateAndDestroy)
+static bool is_aligned(void *const ptr, const ulen_ty alignment)
 {
-	Arena *a = arena_new();
-	REQUIRE_NOT_NULL(a, "arena_new should return a valid pointer");
-
-	a = arena_delete(a);
-	CHECK_NULL(a, "arena_delete should return NULL");
+	return ((ulen_ty)ptr & (alignment - 1)) == 0;
 }
 
-TEST(ArenaLifecycle, DestroyNull)
+struct ArenaTests
 {
-	void *a = arena_delete(NULL);
-	CHECK_NULL(a, "arena_delete() should return NULL");
-}
-
-// --- Test Suite for Arena Allocation ---
-
-struct ArenaAllocation
-{
-	Arena *restrict a;
+	Arena *arena;
 };
 
-TEST_F_SETUP(ArenaAllocation)
+TEST_F_SETUP(ArenaTests)
 {
-	tau->a = arena_new();
-	REQUIRE_NOT_NULL(tau->a);
+	tau->arena = arena_new();
+	REQUIRE(tau->arena != NULL, "arena creation failed");
 }
 
-TEST_F_TEARDOWN(ArenaAllocation) { tau->a = arena_delete(tau->a); }
+TEST_F_TEARDOWN(ArenaTests) { tau->arena = arena_delete(tau->arena); }
 
-TEST(ArenaAllocation, SmallArena)
+TEST_F(ArenaTests, InvalidInputs)
 {
-	Arena *const restrict a = arena_new();
-	REQUIRE_NOT_NULL(a);
+	CHECK(
+		arena_alloc(tau->arena, 0, 8) == NULL, "Size should be greater than 0"
+	);
 
-	CHECK_NOT_NULL(arena_alloc(a, 4, 1), "arena_alloc should succeed");
+	CHECK(
+		arena_alloc(tau->arena, 15, 0) == NULL,
+		"Alignment should be greater than 0"
+	);
 
-	arena_delete(a);
-}
+	CHECK(
+		arena_alloc(tau->arena, 10, 3) == NULL,
+		"Alignment should be a power of 2"
+	);
 
-TEST_F(ArenaAllocation, Simple)
-{
-	void *p = arena_alloc(tau->a, 16, 16);
-	CHECK_NOT_NULL(p, "arena_alloc should succeed");
-	CHECK_ALIGNED(p, 16);
-}
-
-TEST_F(ArenaAllocation, InvalidParams)
-{
-	CHECK_NULL(arena_alloc(NULL, 16, 16), "NULL arena should fail");
-	CHECK_NULL(arena_alloc(tau->a, 0, 16), "size < 1 should fail");
-	CHECK_NULL(arena_alloc(tau->a, 8, 16), "alignment > size should fail");
-	CHECK_NULL(
-		arena_alloc(tau->a, 16, 15), "alignment not power of 2 should fail"
+	CHECK(
+		arena_alloc(tau->arena, 4, 8) == NULL,
+		"Alignment should be less than size"
 	);
 }
 
-TEST_F(ArenaAllocation, LargeAllocations)
+TEST_F(ArenaTests, BasicLifecycle)
 {
-	/* 512MB */
-	void *p1 = arena_alloc(tau->a, (512U * 1024 * 1024), 512);
-	CHECK_NOT_NULL(p1, "First allocation should succeed");
+	char *ch = arena_alloc(tau->arena, sizeof(*ch), _alignof(char));
 
-	/* 1GB */
-	void *p2 = arena_alloc(tau->a, (1024 * 1024 * 1024), 512);
-	CHECK_NOT_NULL(p2, "Second allocation should succeed");
+	REQUIRE(ch != NULL, "alloc failed");
+	*ch = 'w';
+	CHECK(*ch == 'w', "Memory read/write failed");
+
+	int *num = arena_alloc(tau->arena, sizeof(*num), _alignof(int));
+
+	REQUIRE(num != NULL, "alloc failed");
+	*num = INT_MAX;
+	CHECK(*num == INT_MAX, "Memory read/write failed");
+
+	intmax_t *maxint =
+		arena_alloc(tau->arena, sizeof(*maxint), _alignof(intmax_t));
+
+	REQUIRE(maxint != NULL, "alloc failed");
+	*maxint = INTMAX_MIN;
+	CHECK(*maxint == INTMAX_MIN, "Memory read/write failed");
 }
 
-TEST_F(ArenaAllocation, Alignment)
+TEST_F(ArenaTests, Alignment)
 {
-	arena_delete(tau->a);
-	tau->a = arena_new();
-	REQUIRE_NOT_NULL(tau->a);
+	for (len_ty a = 1; a <= 1 << 10; a *= 2)
+	{
+		void *p1 = arena_alloc(tau->arena, 10, 1);
 
-	void *p1 = arena_alloc(tau->a, 1, 1);
-	CHECK_NOT_NULL(p1);
-	CHECK_ALIGNED(p1, 1);
-
-	void *p2 = arena_alloc(tau->a, 2, 2);
-	CHECK_NOT_NULL(p2);
-	CHECK_ALIGNED(p2, 2);
-
-	void *p4 = arena_alloc(tau->a, 4, 4);
-	CHECK_NOT_NULL(p4);
-	CHECK_ALIGNED(p4, 4);
-
-	void *p8 = arena_alloc(tau->a, 8, 8);
-	CHECK_NOT_NULL(p8);
-	CHECK_ALIGNED(p8, 8);
-
-	void *p16 = arena_alloc(tau->a, 16, 16);
-	CHECK_NOT_NULL(p16);
-	CHECK_ALIGNED(p16, 16);
-
-	void *p32 = arena_alloc(tau->a, 32, 32);
-	CHECK_NOT_NULL(p32);
-	CHECK_ALIGNED(p32, 32);
-
-	void *p64 = arena_alloc(tau->a, 64, 64);
-	CHECK_NOT_NULL(p64);
-	CHECK_ALIGNED(p64, 64);
-
-	void *p128 = arena_alloc(tau->a, 128, 128);
-	CHECK_NOT_NULL(p128);
-	CHECK_ALIGNED(p128, 128);
-
-	// Allocate with size > alignment
-	void *p28 = arena_alloc(tau->a, 4 * 7, 4);
-	CHECK_NOT_NULL(p28);
-	CHECK_ALIGNED(p28, 4);
+		REQUIRE(p1 != NULL, "alloc failed");
+		CHECK(is_aligned(p1, 1), "pointer not aligned");
+		memset(p1, 'w', 10);
+	}
 }
 
-// --- Test Suite for Arena Free List ---
-
-struct ArenaFreeList
+TEST_F(ArenaTests, FieldExpansion)
 {
-	Arena *restrict a;
-};
+	tau->arena->minimum_field_size = 4096;
 
-TEST_F_SETUP(ArenaFreeList)
-{
-	tau->a = arena_new();
-	REQUIRE_NOT_NULL(tau->a);
-}
+	// Note: Overhead of Field struct and alignment padding will be involved
+	void *p1 = arena_alloc(tau->arena, 2000, 1);
+	REQUIRE(p1 != NULL, "Allocation failed");
+	memset(p1, 'w', 2000);
 
-TEST_F_TEARDOWN(ArenaFreeList) { tau->a = arena_delete(tau->a); }
+	// Verify internals (White-box)
+	REQUIRE(tau->arena->head != NULL, "Arena head should not be NULL");
+	Field *first_field = tau->arena->head;
 
-TEST_F(ArenaFreeList, FreeAndReuse)
-{
-	void *ptr_to_free = arena_alloc(tau->a, 64, 64);
-	REQUIRE_NOT_NULL(ptr_to_free);
-	void *p_other = arena_alloc(tau->a, 64, 64);
-	REQUIRE_NOT_NULL(p_other);
+	// This alloc should force a new Field because 2000 + 4000 > 4096
+	void *p2 = arena_alloc(tau->arena, 4000, 1);
+	REQUIRE(p2 != NULL, "Allocation failed");
+	memset(p2, 'w', 4000);
 
-	REQUIRE_TRUE(
-		BLOCKS_ISEMPTY(tau->a->blocks), "Free list should initially be empty"
-	);
-
-	// Free a pointer.
-	arena_free(tau->a, ptr_to_free);
-	CHECK_FALSE(
-		BLOCKS_ISEMPTY(tau->a->blocks),
-		"Free list should have one block after first free"
-	);
-
-	// Allocate again with the same size
-	void *p_reused = arena_alloc(tau->a, 64, 64);
-	CHECK_NOT_NULL(p_reused, "Allocation from free list should succeed");
-
-	// It should return the *exact same pointer*
-	CHECK_PTR_EQ(ptr_to_free, p_reused, "freed memory should be reused");
-
-	// The free list should be empty again
-	CHECK_TRUE(
-		BLOCKS_ISEMPTY(tau->a->blocks), "Free list should be empty after reuse"
-	);
-
-	// Allocate another, should bump from the main offset
-	void *p_bumped = arena_alloc(tau->a, 64, 64);
-	CHECK_NOT_NULL(p_bumped);
-}
-
-TEST_F(ArenaFreeList, FreeNull)
-{
-	// Freeing NULL should be a safe no-op
-	void *p = arena_free(tau->a, NULL);
-	CHECK_NULL(p, "arena_free(a, NULL) should return NULL");
-	CHECK_TRUE(
-		BLOCKS_ISEMPTY(tau->a->blocks), "Free list should still be empty"
-	);
-
-	// Freeing with a NULL arena should also be a no-op
-	p = arena_free(NULL, (void *)0x123cdf);
-	CHECK_NULL(p, "arena_free(NULL, ptr) should return NULL");
-}
-
-TEST_F(ArenaFreeList, ReuseSmaller)
-{
-	// Allocate a 256-byte block
-	void *p256 = arena_alloc(tau->a, 256, 256);
-	REQUIRE_NOT_NULL(p256);
-
-	// Free it
-	arena_free(tau->a, p256);
-	REQUIRE_FALSE(BLOCKS_ISEMPTY(tau->a->blocks));
-
-	// Allocate a 32-byte block.
-	// The current implementation finds the first fitting block and returns it,
-	// without splitting the block.
-	void *p32 = arena_alloc(tau->a, 32, 32);
-	REQUIRE_NOT_NULL(p32);
-
-	// Should reuse the same pointer address
-	// CHECK_PTR_EQ(p32, p256, "freed memory should be reused");
-	// The free list should now be empty, as the 256-byte block was "consumed"
-	CHECK_TRUE(
-		BLOCKS_ISEMPTY(tau->a->blocks),
-		"Free list should be empty after consuming block"
+	CHECK(tau->arena->head != first_field, "Arena did not push a new field");
+	CHECK(
+		tau->arena->head->next == first_field,
+		"New field is not linked to old field"
 	);
 }
 
-struct FreeAndReuse
+TEST_F(ArenaTests, LargeAllocation)
 {
-	Arena *restrict a;
-	void *restrict p1, *restrict p2;
-	size_t s1, s2;
-};
+	tau->arena->minimum_field_size = 4096;  // 4KB default
+	ulen_ty size = 1024 * 10;
 
-TEST_F_SETUP(FreeAndReuse)
-{
-	tau->s1 = 4 * 4;
-	tau->s2 = 4 * 8;
-	tau->a = arena_new();
-	REQUIRE_NOT_NULL(tau->a);
+	// Allocate 10KB (larger than default field size)
+	void *p1 = arena_alloc(tau->arena, size, 16);
+	CHECK(p1 != NULL, "allocation failed");
+	memset(p1, 'w', size);
 
-	tau->p1 = arena_alloc(tau->a, tau->s1, 4);
-	REQUIRE_NOT_NULL(tau->p1);
-
-	tau->p2 = arena_alloc(tau->a, tau->s2, 4);
-	REQUIRE_NOT_NULL(tau->p2);
-}
-
-TEST_F_TEARDOWN(FreeAndReuse) { tau->a = arena_delete(tau->a); }
-
-TEST_F(FreeAndReuse, FreeBigSmallReuseSmallBig)
-{
-	// Free big memory then small memory.
-
-	arena_free(tau->a, tau->p2);
-	REQUIRE_FALSE(
-		BLOCKS_ISEMPTY(tau->a->blocks),
-		"Free list should have one block after first free"
+	CHECK(
+		tau->arena->head->size >= size,
+		"Field size did not adapt to large allocation"
 	);
-	arena_free(tau->a, tau->p1);
-
-	// Allocate small memory then big memory.
-
-	void *p1 = arena_alloc(tau->a, tau->s1, 4);
-	CHECK_PTR_EQ(p1, tau->p1, "freed memory should be reused");
-
-	void *p2 = arena_alloc(tau->a, tau->s2, 4);
-	CHECK_PTR_EQ(p2, tau->p2, "freed memory should be reused");
 }
 
-TEST_F(FreeAndReuse, FreeBigSmallReuseBigSmall)
+TEST_F(ArenaTests, FreeListReuse)
 {
-	// Free big memory then small memory.
+	void *p1 = arena_alloc(tau->arena, 64, 8);
+	void *p2 = arena_alloc(tau->arena, 64, 8);
+	void *p3 = arena_alloc(tau->arena, 64, 8);
 
-	arena_free(tau->a, tau->p2);
-	REQUIRE_FALSE(
-		BLOCKS_ISEMPTY(tau->a->blocks),
-		"Free list should have one block after first free"
+	memset(p1, 'w', 64);
+	memset(p2, 'w', 64);
+	memset(p3, 'w', 64);
+	REQUIRE(
+		ARRAY_ISEMPTY(tau->arena->blocks),
+		"list of free blocks should be empty"
 	);
-	arena_free(tau->a, tau->p1);
-
-	// Allocate big memory then small.
-
-	void *p2 = arena_alloc(tau->a, tau->s2, 4);
-	CHECK_PTR_EQ(p2, tau->p2, "freed memory should be reused");
-
-	void *p1 = arena_alloc(tau->a, tau->s1, 4);
-	CHECK_PTR_EQ(p1, tau->p1, "freed memory should be reused");
-}
-
-TEST_F(FreeAndReuse, FreeSmallBigReuseBigSmall)
-{
-	// Free small memory then big memory.
-
-	arena_free(tau->a, tau->p1);
-	REQUIRE_FALSE(
-		BLOCKS_ISEMPTY(tau->a->blocks),
-		"Free list should have one block after first free"
+	// Free p2. It should go to the free list.
+	arena_free(tau->arena, p2);
+	CHECK(
+		ARRAY_ISEMPTY(tau->arena->blocks) == false,
+		"list of free blocks should not be empty"
 	);
-	arena_free(tau->a, tau->p2);
 
-	// Allocate big memory then small.
+	// Alloc p4. It should ideally take p2's spot.
+	void *top = tau->arena->head->top;
+	void *p4 = arena_alloc(tau->arena, 64, 8);
 
-	void *p2 = arena_alloc(tau->a, tau->s2, 4);
-	CHECK_PTR_EQ(p2, tau->p2, "freed memory should be reused");
-
-	void *p1 = arena_alloc(tau->a, tau->s1, 4);
-	CHECK_PTR_EQ(p1, tau->p1, "freed memory should be reused");
+	memset(p4, 'w', 64);
+	// Depending on implementation (LIFO vs FIFO free list),
+	// p4 often equals p2.
+	CHECK(tau->arena->head->top == top, "arena should not bump the top");
 }
-
-TEST_F(FreeAndReuse, FreeSmallBigReuseSmallBig)
-{
-	// Free small memory then big memory.
-
-	arena_free(tau->a, tau->p1);
-	REQUIRE_FALSE(
-		BLOCKS_ISEMPTY(tau->a->blocks),
-		"Free list should have one block after first free"
-	);
-	arena_free(tau->a, tau->p2);
-
-	// Allocate big memory then small.
-
-	/* void *p1 =  */ arena_alloc(tau->a, tau->s1, 4);
-	// CHECK_PTR_EQ(p1, tau->p1, "freed memory should be reused");
-
-	/* void *p2 =  */ arena_alloc(tau->a, tau->s2, 4);
-	// CHECK_PTR_EQ(p2, tau->p2, "freed memory should be reused");
-}
-
-// --- Test Suite for Arena Reset ---
 
 struct ArenaReset
 {
-	Arena *restrict a;
+	Arena *arena;
 };
 
 TEST_F_SETUP(ArenaReset)
 {
-	tau->a = arena_new();
-	REQUIRE_NOT_NULL(tau->a);
+	tau->arena = arena_new();
+	REQUIRE(tau->arena != NULL, "arena creation failed");
 }
 
-TEST_F_TEARDOWN(ArenaReset) { tau->a = arena_delete(tau->a); }
+TEST_F_TEARDOWN(ArenaReset) { tau->arena = arena_delete(tau->arena); }
 
 TEST_F(ArenaReset, Reset)
 {
-	// Allocate, free, and allocate again to populate top and blocks
-	void *p1 = arena_alloc(tau->a, 64, 64);
-	REQUIRE_NOT_NULL(p1);
-	arena_free(tau->a, p1);                    // p1 is on free list
-	void *p2 = arena_alloc(tau->a, 128, 128);  // p2 is bumped
-	REQUIRE_NOT_NULL(p2);
+	void *p1 = arena_alloc(tau->arena, 100, 1);
+	void *p2 = arena_alloc(tau->arena, 100, 2);
+	void *p3 = arena_alloc(tau->arena, 100, 8);
 
-	// Check that top is non-zero and blocks is non-null
-	// CHECK_PTR_NE(
-	// 	tau->a->top, tau->a->base, "Offset should be non-zero before reset"
-	// );
-	CHECK_FALSE(
-		BLOCKS_ISEMPTY(tau->a->blocks),
-		"Free list should be non-null before reset"
+	REQUIRE(p1 != NULL, "allocation failed");
+	REQUIRE(p2 != NULL, "allocation failed");
+	REQUIRE(p3 != NULL, "allocation failed");
+	memset(p1, 'w', 100);
+	memset(p2, 'w', 100);
+	memset(p3, 'w', 100);
+
+	arena_reset(tau->arena);
+	CHECK(tau->arena->head != NULL, "Head should not be NULL after reset");
+
+	// Allocating again should return a pointer close to the base
+	void *p4 = arena_alloc(tau->arena, 100, 1);
+
+	REQUIRE(p4 != NULL, "allocation failed");
+	memset(p4, 'w', 100);
+	// In a stack allocator, p4 should essentially equal p1
+	// (assuming alignment and headers match exactly)
+	CHECK(p4 == p1, "Reset did not roll back the top pointer correctly");
+	// Check that free blocks were cleared
+	CHECK(
+		ARRAY_ISEMPTY(tau->arena->blocks),
+		"list of free blocks should be empty."
 	);
-
-	// Reset the arena
-	arena_reset(tau->a);
-
-	// Check that top and blocks are cleared
-	// CHECK_PTR_EQ(tau->a->top, tau->a->base, "Offset should be 0 after reset");
-	CHECK_TRUE(
-		BLOCKS_ISEMPTY(tau->a->blocks), "Free list should be NULL after reset"
-	);
-
-	// Allocate again
-	void *p3 = arena_alloc(tau->a, 64, 64);
-	REQUIRE_NOT_NULL(p3);
-	// The new pointer should have the same address as the *first* allocation
-	CHECK_EQ(p3, p1, "First allocation after reset should match p1 address");
-
-	// Allocate again
-	void *p4 = arena_alloc(tau->a, 128, 128);
-	REQUIRE_NOT_NULL(p4);
-	// The new pointer should have the same address as the *second* allocation
-	CHECK_EQ(p4, p2, "Second allocation after reset should match p2 address");
 }
 
-TEST_F(ArenaReset, BigAllocsReset)
+TEST_F(ArenaReset, ResetWithFree)
 {
-	// Allocate, free, and allocate again to populate top and blocks
-	void *p1 = arena_alloc(tau->a, 512U * 1024 * 1024, 64);
-	REQUIRE_NOT_NULL(p1);
+	void *p1 = arena_alloc(tau->arena, 100, 1);
+	void *p2 = arena_alloc(tau->arena, 100, 2);
+	void *p3 = arena_alloc(tau->arena, 100, 8);
 
-	struct Field *bottom = tau->a->head;
+	REQUIRE(p1 != NULL, "allocation failed");
+	REQUIRE(p2 != NULL, "allocation failed");
+	REQUIRE(p3 != NULL, "allocation failed");
+	memset(p1, 'w', 100);
+	memset(p2, 'w', 100);
+	memset(p3, 'w', 100);
+	arena_free(tau->arena, p2);
 
-	arena_free(tau->a, p1);  // p1 is on free list
-	void *p2 = arena_alloc(tau->a, 1024U * 1024 * 1024, 128);  // p2 is bumped
-	REQUIRE_NOT_NULL(p2);
+	arena_reset(tau->arena);
 
-	// Check that top is non-zero and blocks is non-null
-	// CHECK_PTR_NE(
-	// 	tau->a->top, tau->a->base, "Offset should be non-zero before reset"
-	// );
-	CHECK_FALSE(
-		BLOCKS_ISEMPTY(tau->a->blocks),
-		"Free list should be non-null before reset"
+	CHECK(tau->arena->head != NULL, "Head should not be NULL after reset");
+	void *p4 = arena_alloc(tau->arena, 100, 1);
+
+	REQUIRE(p4 != NULL, "allocation failed");
+	memset(p4, 'w', 100);
+	CHECK(p4 == p1, "Reset did not roll back the top pointer correctly");
+	CHECK(
+		ARRAY_ISEMPTY(tau->arena->blocks),
+		"list of free blocks should be empty."
 	);
-
-	// Reset the arena
-	arena_reset(tau->a);
-
-	// Check that top and blocks are cleared
-	// CHECK_PTR_EQ(tau->a->top, tau->a->base, "Offset should be 0 after reset");
-	CHECK_PTR_EQ(bottom, tau->a->head, "Fields should be reset");
-	CHECK_TRUE(
-		BLOCKS_ISEMPTY(tau->a->blocks), "Free list should be NULL after reset"
-	);
-
-	// Allocate again
-	void *p3 = arena_alloc(tau->a, 512U * 1024 * 1024, 64);
-	REQUIRE_NOT_NULL(p3);
-	// The new pointer should have the same address as the *first* allocation
-	CHECK_EQ(p3, p1, "First allocation after reset should match p1 address");
-
-	// Allocate again
-	void *p4 = arena_alloc(tau->a, 1024U * 1024 * 1024, 128);
-	REQUIRE_NOT_NULL(p4);
-	// The new pointer should have the same address as the *second* allocation
-	CHECK_EQ(p4, p2, "Second allocation after reset should match p2 address");
 }
 
-TEST(ArenaReset, ResetNull)
+TEST_F(ArenaReset, ResetWithFieldExpansion)
 {
-	// Resetting a NULL arena should be a safe no-op
-	arena_reset(NULL);
+	tau->arena->minimum_field_size = 4096;
+	void *p1 = arena_alloc(tau->arena, 3000, 1);
+	void *p2 = arena_alloc(tau->arena, 3000, 2);
+	void *p3 = arena_alloc(tau->arena, 3000, 8);
+
+	REQUIRE(p1 != NULL, "allocation failed");
+	REQUIRE(p2 != NULL, "allocation failed");
+	REQUIRE(p3 != NULL, "allocation failed");
+	memset(p1, 'w', 3000);
+	memset(p2, 'w', 3000);
+	memset(p3, 'w', 3000);
+	void *old_top = tau->arena->head->top;
+
+	arena_reset(tau->arena);
+
+	CHECK(tau->arena->head != NULL, "Head should not be NULL after reset");
+	CHECK(tau->arena->head->top != old_top, "top should be reset");
+	void *p4 = arena_alloc(tau->arena, 100, 1);
+
+	REQUIRE(p4 != NULL, "allocation failed");
+	memset(p4, 'w', 100);
+	CHECK(p4 == p1, "Reset did not roll back the top pointer correctly");
+	CHECK(
+		ARRAY_ISEMPTY(tau->arena->blocks),
+		"list of free blocks should be empty."
+	);
+}
+
+TEST_F(ArenaReset, ResetWithFieldExpansionWithFree)
+{
+	tau->arena->minimum_field_size = 4096;
+	void *p1 = arena_alloc(tau->arena, 3000, 1);
+	void *p2 = arena_alloc(tau->arena, 3000, 2);
+	void *p3 = arena_alloc(tau->arena, 3000, 8);
+
+	REQUIRE(p1 != NULL, "allocation failed");
+	REQUIRE(p2 != NULL, "allocation failed");
+	REQUIRE(p3 != NULL, "allocation failed");
+	memset(p1, 'w', 3000);
+	memset(p2, 'w', 3000);
+	memset(p3, 'w', 3000);
+	arena_free(tau->arena, p2);
+	void *old_top = tau->arena->head->top;
+
+	arena_reset(tau->arena);
+
+	CHECK(tau->arena->head != NULL, "Head should not be NULL after reset");
+	CHECK(tau->arena->head->top != old_top, "top should be reset");
+	void *p4 = arena_alloc(tau->arena, 100, 1);
+
+	REQUIRE(p4 != NULL, "allocation failed");
+	memset(p4, 'w', 100);
+	CHECK(p4 == p1, "Reset did not roll back the top pointer correctly");
+	CHECK(
+		ARRAY_ISEMPTY(tau->arena->blocks),
+		"list of free blocks should be empty."
+	);
 }

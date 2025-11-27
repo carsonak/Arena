@@ -1,7 +1,8 @@
 #include <assert.h>
-#include <stddef.h>  // size_t
-#include <stdlib.h>  // *alloc
-#include <string.h>  // memset
+#include <stdbool.h>  // bool
+#include <stdio.h>    // perror
+#include <stdlib.h>   // calloc
+#include <string.h>   // memset
 #include <sys/mman.h>  // mmap, munmap
 
 #include "arena.h"
@@ -16,44 +17,33 @@
 #define IS_POWER2(n) (((n) & ((n) - 1)) == 0)
 #define ARRAY_LEN(arr) (sizeof(arr) / sizeof(*(arr)))
 
-/********************************** GLOBALS ***************************************/
+#if defined(__has_feature)
+	#if __has_feature(address_sanitizer)  // for clang
+		#define __SANITIZE_ADDRESS__      // GCC already sets this
+	#endif
+#endif
 
-size_t MINIMUM_FIELD_SIZE = MB256;
+#ifdef __SANITIZE_ADDRESS__
+	#include <sanitizer/asan_interface.h>
+
+	#define ASAN_POISON_MEMORY_REGION(addr, size)                             \
+		__asan_poison_memory_region((addr), (size))
+	#define ASAN_UNPOISON_MEMORY_REGION(addr, size)                           \
+		__asan_unpoison_memory_region((addr), (size))
+#else
+	#define ASAN_POISON_MEMORY_REGION(addr, size) ((void)(addr), (void)(size))
+	#define ASAN_UNPOISON_MEMORY_REGION(addr, size)                           \
+		((void)(addr), (void)(size))
+#endif
 
 /********************************** TYPES ****************************************/
 
 typedef unsigned char u8;
 
-/*!
- * @brief details of a chunk of reserved memory in an arena.
- */
-typedef struct Field
-{
-	/*! @public usable capacity in bytes of this Field. */
-	size_t size;
-	/*! @private pointer to the next Field in the arena. */
-	struct Field *restrict next;
-	/*! @private start of untouched memory in the Field. */
-	u8 *top;
-	/*! @private start of usable memory in the Field. */
-	u8 base[];
-} Field;
-
-/*!
- * @brief node of a linked list of free blocks in an arena.
- */
-typedef struct Free_block
-{
-	/*! size in bytes of the memory block. */
-	size_t size;
-	/*! pointer to the next free memory block. */
-	struct Free_block *restrict next;
-} Free_block;
-
 /****************************** STATIC FUNCTIONS **********************************/
 
 static Free_block *fb_search(
-	Arena *const arena, const size_t size, const size_t alignment
+	Arena *const arena, const ulen_ty size, const ulen_ty alignment
 ) _nonnull;
 static Free_block *fb_start_address(u8 *ptr) _nonnull;
 static void fb_insert(
@@ -62,9 +52,16 @@ static void fb_insert(
 
 static void field_delete(Field *const field) _nonnull;
 static Field *
-field_new(const size_t capacity) _malloc _malloc_free(field_delete);
-static void
-field_push(Field *const restrict field, Arena *const restrict arena) _nonnull;
+field_new(const ulen_ty capacity) _malloc _malloc_free(field_delete);
+
+static bool arena_isvalid(const Arena *const arena);
+static Field *
+arena_push_field(Arena *const restrict arena, const ulen_ty capacity) _nonnull;
+
+static bool alignment_isvalid(const ulen_ty a)
+{
+	return (a > 0 && IS_POWER2(a));
+}
 
 /*!
  * @brief return the next multiple of the given number starting from a given number.
@@ -76,10 +73,10 @@ field_push(Field *const restrict field, Arena *const restrict arena) _nonnull;
  *
  * @returns next multiple of `alignment` greater than `n`.
  */
-static size_t align_up(const size_t n, const size_t alignment)
+static ulen_ty align_up(const ulen_ty n, const ulen_ty alignment)
 {
-	assert(IS_POWER2(alignment));
-	const size_t mod = n & (alignment - 1);
+	assert(alignment_isvalid(alignment));
+	const ulen_ty mod = n & (alignment - 1);
 
 	if (mod == 0)
 		return (n);
@@ -97,10 +94,10 @@ static size_t align_up(const size_t n, const size_t alignment)
  *
  * @returns previous multiple of `alignment` starting from `n`.
  */
-static size_t align_down(const size_t n, const size_t alignment)
+static ulen_ty align_down(const ulen_ty n, const ulen_ty alignment)
 {
-	assert(IS_POWER2(alignment));
-	const size_t mod = n & (alignment - 1);
+	assert(alignment_isvalid(alignment));
+	const ulen_ty mod = n & (alignment - 1);
 
 	if (mod == 0)
 		return (n);
@@ -114,9 +111,9 @@ static size_t align_down(const size_t n, const size_t alignment)
  * @param size the size to classify.
  * @returns index of the size class.
  */
-static size_t size_class_index(const size_t size)
+static ulen_ty size_class_index(const ulen_ty size)
 {
-	size_t i = 0;
+	ulen_ty i = 0;
 	while (i < ARRAY_LEN(FREE_BLOCKS_SIZES))
 	{
 		if (size <= FREE_BLOCKS_SIZES[i])
@@ -129,6 +126,44 @@ static size_t size_class_index(const size_t size)
 }
 
 /*!
+ * @brief check if an Arena is in a valid state.
+ *
+ * @param arena pointer to the arena.
+ * @returns true if valid, false otherwise.
+ */
+static bool arena_isvalid(const Arena *const arena)
+{
+	return (arena && arena->minimum_field_size > 0);
+}
+
+/*!
+ * @brief push a new Field onto an Arena.
+ *
+ * @param arena pointer to the arena.
+ * @param capacity minimum Field size to allocate.
+ * @returns pointer to the pushed Field.
+ */
+static Field *
+arena_push_field(Arena *const restrict arena, const ulen_ty capacity)
+{
+	assert(arena_isvalid(arena));
+	assert(capacity > 0);
+	ulen_ty size = arena->minimum_field_size;
+
+	while (size / 2 < capacity)
+		size *= 2;
+
+	Field *const field = field_new(size);
+
+	if (!field)
+		return (NULL);
+
+	field->next = arena->head;
+	arena->head = field;
+	return (field);
+}
+
+/*!
  * @brief search for a `Free_block` of atleast the given size.
  * @public @memberof Free_block
  *
@@ -137,20 +172,19 @@ static size_t size_class_index(const size_t size)
  * @returns pointer to the first block with a size greater or equal to `size`, NULL otherwise.
  */
 static Free_block *
-fb_search(Arena *const arena, const size_t size, const size_t alignment)
+fb_search(Arena *const arena, const ulen_ty size, const ulen_ty alignment)
 {
-	assert(IS_POWER2(alignment));
-	for (size_t i = size_class_index(size); i < ARRAY_LEN(arena->blocks); i++)
+	assert(arena_isvalid(arena));
+	assert(alignment_isvalid(alignment));
+	for (ulen_ty i = size_class_index(size); i < ARRAY_LEN(arena->blocks); i++)
 	{
 		Free_block *restrict *prev = &arena->blocks[i];
 		for (Free_block *block = *prev; block; block = block->next)
 		{
-			const size_t bs = block->size;
+			const ulen_ty bs = block->size;
 			u8 *const mem = (u8 *)block + sizeof(block->size);
-			if (bs >= size + alignment - 1 ||
-				(bs >= size &&
-				 (size_t)(&mem[block->size] -
-						  align_up((size_t)mem, alignment)) >= size))
+			if (bs >= size + alignment - 1 || /* clang-format off */
+				(bs >= size && (ulen_ty)(&mem[block->size] - align_up((ulen_ty)mem, alignment)) >= size)) /* clang-format on */
 			{
 				*prev = block->next;
 				return (block);
@@ -164,24 +198,28 @@ fb_search(Arena *const arena, const size_t size, const size_t alignment)
 }
 
 /*!
- * @brief search for the true beginning of the memory block.
+ * @brief search for the true beginning of an allocation.
  * @public @memberof Free_block
  *
- * @param ptr where to start searching from.
+ * @param ptr a pointer allocated by `arena_alloc`.
  *
- * The first 8 bytes (sizeof(Free_block.size)) of the block should have the size of
- * the block, every byte in between there and `ptr` should be zeroed.
+ * For every pointer allocated from the arena, book keeping info is stored in
+ * the memory just before the pointer. The gap in between that info and the
+ * pointer is always zeroed out. We can therefore find the first non-zeroed
+ * memory just before a pointer in order to home in on the original position
+ * where this allocation was bumped from.
  *
- * @returns pointer to the start of the `Free_block`.
+ * @returns pointer to a `Free_block` at the beginning of the allocation.
  */
 static Free_block *fb_start_address(u8 *ptr)
 {
+	assert(ptr);
 	do
 	{
 		ptr--;
 	} while (*ptr == 0);
 
-	return ((Free_block *)align_down((size_t)ptr, alignof(Free_block)));
+	return ((Free_block *)align_down((ulen_ty)ptr, alignof(Free_block)));
 }
 
 /*!
@@ -194,6 +232,8 @@ static Free_block *fb_start_address(u8 *ptr)
 static void
 fb_insert(Arena *const restrict arena, Free_block *const restrict block)
 {
+	assert(arena_isvalid(arena));
+	assert(block);
 	Free_block *restrict *slot = &arena->blocks[size_class_index(block->size)];
 
 	block->next = *slot;
@@ -220,38 +260,24 @@ static void field_delete(Field *const field)
  * @param capacity size in bytes of the new Field.
  * @returns pointer to the new Field, NULL on error.
  */
-static Field *field_new(const size_t capacity)
+static Field *field_new(const ulen_ty size)
 {
-	size_t size = MINIMUM_FIELD_SIZE;
-
-	while (capacity > size / 2)
-		size *= 2;
-
+	assert(size > 0);
 	Field *const field = mmap(
-		NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0
+		NULL, size + sizeof(*field), PROT_READ | PROT_WRITE,
+		MAP_PRIVATE | MAP_ANONYMOUS, -1, 0
 	);
 
-	if (field)
+	if (!field)
 	{
-		*field = (Field){.size = size - sizeof(*field)};
-		field->top = field->base;
+		perror("mmap error");
+		return (NULL);
 	}
 
+	*field = (Field){.size = size};
+	field->top = field->base;
+	ASAN_POISON_MEMORY_REGION(field->base, field->size);
 	return (field);
-}
-
-/*!
- * @brief push a `Field` onto an `Arena`'s stack of fields.
- * @public @memberof Field
- *
- * @param field pointer to the Field to push.
- * @param arena pointer to the Arena with the stack.
- */
-static void
-field_push(Field *const restrict field, Arena *const restrict arena)
-{
-	field->next = arena->head;
-	arena->head = field;
 }
 
 /**********************************************************************************/
@@ -293,6 +319,9 @@ Arena *arena_new()
 {
 	Arena *const arena = calloc(1, sizeof(*arena));
 
+	if (arena)
+		arena->minimum_field_size = MB256;
+
 	return (arena);
 }
 
@@ -304,7 +333,7 @@ Arena *arena_new()
  */
 void arena_reset(Arena *const arena)
 {
-	if (!arena)
+	if (!arena_isvalid(arena))
 		return;
 
 	if (arena->head)
@@ -319,6 +348,10 @@ void arena_reset(Arena *const arena)
 	}
 
 	memset((void *)arena->blocks, 0, sizeof(arena->blocks));
+#ifdef ARENA_STATS
+	arena->frees++;
+	arena->memory_inuse = 0;
+#endif /* ARENA_STATS */
 }
 
 /*!
@@ -332,21 +365,32 @@ void arena_reset(Arena *const arena)
  * @returns an aligned pointer to a memory block atleast `size` bytes,
  * NULL on error.
  */
-void *arena_alloc(Arena *const arena, size_t size, const size_t alignment)
+void *arena_alloc(Arena *const arena, ulen_ty size, ulen_ty alignment)
 {
-	if (!arena || size < 1 || alignment > size || !IS_POWER2(alignment))
+	if (!arena_isvalid(arena) || size < 1 || alignment > size ||
+		!alignment_isvalid(alignment))
 		return (NULL);
 
-	const size_t alignof_fb = _alignof(Free_block);
 	/* Search the free list first. */
 
 	Free_block *restrict block = fb_search(arena, size, alignment);
 
 	if (block)
 	{
-		return (
-			(void *)align_up((size_t)block + sizeof(block->size), alignment)
+		u8 *const user_space = (u8 *)block + sizeof(block->size);
+		const ulen_ty aligned = align_up((ulen_ty)user_space, alignment);
+
+		/* Unpoison the minimum memory needed to fulfil user's request. */
+		ASAN_UNPOISON_MEMORY_REGION(
+			user_space, (aligned - (len_ty)user_space) + size
 		);
+		memset(user_space, 0, aligned - (ulen_ty)user_space);
+#ifdef ARENA_STATS
+		arena->allocs++;
+		arena->memory_inuse += block->size;
+		arena->total_memory_requested += size;
+#endif /* ARENA_STATS */
+		return ((void *)aligned);
 	}
 
 	/* Otherwise, allocate from the top of the Arena. */
@@ -359,49 +403,52 @@ void *arena_alloc(Arena *const arena, size_t size, const size_t alignment)
 
 	if (!field)
 	{
-		field = field_new(size);
+		field = arena_push_field(arena, size);
 		if (!field)
-		{
-			arena_delete(arena);
-			return (NULL);
-		}
-
-		field_push(field, arena);
+			return (arena_delete(arena));
 	}
 
-	size_t aligned = align_up(
-		(size_t)field->top + sizeof(block->size),
-		alignof_fb > alignment ? alignof_fb : alignment
-	);
-	/* top should always be aligned for a `Free_block` type. */
+	const ulen_ty alignof_fb = _alignof(Free_block);
+	alignment = alignof_fb > alignment ? alignof_fb : alignment;
+	/* The first few bytes of memory are reserved for internal book keeping. */
+	u8 *user_space = (u8 *)field->top + sizeof(block->size);
+	/* The aligned pointer to return. */
+	ulen_ty aligned = align_up((ulen_ty)user_space, alignment);
+	/* top should always be aligned to store a `Free_block` struct. */
 	u8 *new_top = (u8 *)align_up(aligned + size, alignof_fb);
 
 	if (new_top > field->base + field->size)
 	{
-		field = field_new(size);
+		field = arena_push_field(arena, size);
 		if (!field)
-		{
-			arena_delete(arena);
-			return (NULL);
-		}
+			return (arena_delete(arena));
 
-		field_push(field, arena);
-		aligned = align_up(
-			(size_t)field->top + sizeof(block->size),
-			alignof_fb > alignment ? alignof_fb : alignment
-		);
+		user_space = (u8 *)field->top + sizeof(block->size);
+		aligned = align_up((ulen_ty)user_space, alignment);
 		new_top = (u8 *)align_up(aligned + size, alignof_fb);
 	}
 
-	/* Zero out the memory between the current position of the top and the */
-	/* start of the mem to be returned. */
-	block = (Free_block *)memset(field->top, 0, aligned - (size_t)field->top);
-	/* The first 8 (sizeof(Free_block.size)) bytes after the field top store */
-	/* the offset to the new position of the top, excluding the 8 bytes. */
-	/* This position will also serve as the beginning of the `Free_block` */
-	/* struct when this allocation is freed. */
-	block->size = new_top - &field->top[sizeof(block->size)];
+	/* Unpoison the minimum memory needed to fulfil user's request */
+	/* and store book keeping info. */
+	ASAN_UNPOISON_MEMORY_REGION(
+		field->top, (aligned - (len_ty)field->top) + size
+	);
+
+	/* When this allocation is freed, it will be stored in the free list. */
+	/* The first few bytes after the current top will be used to store the */
+	/* `Free_block` struct that contains details about the free block. */
+	/* But until then we only store the total size of this allocation in */
+	/* the first few bytes excluding the space needed to store this information. */
+	/* The gap between the size and the pointer to be returned should be zeroed. */
+
+	block = (Free_block *)memset(field->top, 0, aligned - (ulen_ty)field->top);
+	block->size = new_top - user_space;
 	field->top = new_top;
+#ifdef ARENA_STATS
+	arena->allocs++;
+	arena->memory_inuse += block->size;
+	arena->total_memory_requested += size;
+#endif /* ARENA_STATS */
 	return ((void *)aligned);
 }
 
@@ -415,12 +462,21 @@ void *arena_alloc(Arena *const arena, size_t size, const size_t alignment)
  */
 void *arena_free(Arena *const restrict arena, void *const restrict ptr)
 {
-	if (!arena || !ptr)
+	if (!arena_isvalid(arena) || !ptr)
 		return (NULL);
 
 	Free_block *const restrict block = fb_start_address(ptr);
 
+	ASAN_POISON_MEMORY_REGION(
+		(u8 *)block + sizeof(*block),
+		block->size - (sizeof(*block) - sizeof(block->size))
+	);
 	fb_insert(arena, block);
+
+#ifdef ARENA_STATS
+	arena->frees++;
+	arena->memory_inuse -= block->size;
+#endif /* ARENA_STATS */
 	return (NULL);
 }
 

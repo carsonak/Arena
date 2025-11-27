@@ -43,4 +43,7 @@ option(ARENA_ENABLE_TESTING "Enable tests for bigint_calc"
 if(ARENA_ENABLE_TESTING)
     enable_testing()
     add_subdirectory(tests)
+
+    target_sources(arena_fuzzer PRIVATE arena.c)
+    target_include_directories(arena_fuzzer PUBLIC ${CMAKE_CURRENT_LIST_DIR})
 endif()
