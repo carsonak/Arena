@@ -30,6 +30,25 @@ static bool is_aligned(void *const ptr, const ulen_ty alignment)
 	return ((ulen_ty)ptr & (alignment - 1)) == 0;
 }
 
+static void print_help(const char *const prog_name)
+{
+	printf("USAGE: %.128s [OPTIONS]\n", prog_name);
+	printf("  Stress test the arena allocator with random allocations.\n");
+	printf("\n");
+	printf("OPTIONS\n");
+	printf("  -aN, -a N, --max-alloc=A\n");
+	printf("    maximum size of a single allocation.\n");
+	printf("  -fN, -f N, --field-size=N\n");
+	printf("    minimum size of a field in the arena.\n");
+	printf("  -gN, -g N, --max-align=N\n");
+	printf("    exponent of 2 used to calculate the maximum alignment of a ");
+	printf("    single allocation. Valid ranges are between 0-16.\n");
+	printf("  -iN, -i N, --iterations=N\n");
+	printf("    total number of iterations to perform.\n");
+	printf("  -sN, -s N, --seed=N\n");
+	printf("    seed for the pseudo-random number generator.\n");
+}
+
 static void print_arena_stats(const Arena *const arena)
 {
 	len_ty fields = 0, arena_size = 0;
@@ -58,28 +77,55 @@ int main(int argc, char *argv[])
 	int status = 0;
 
 	ulen_ty iterations = 1 << 20;
+	ulen_ty max_alloc = 2 << 13;
+	ulen_ty minimum_field_size = 256U * 1024;
+	unsigned max_align = 10;
 	unsigned seed = 0x12345;
-	ulen_ty minimum_field_size = 256U * 1024;  // 256KB
-	struct option options[] = {
+	const char short_opts[] = "a:f:g:hi:s:";
+	struct option long_opts[] = {
 		{"field-size", required_argument, NULL, 'f'},
+		{"help", no_argument, NULL, 'h'},
 		{"iterations", required_argument, NULL, 'i'},
+		{"max-alloc", required_argument, NULL, 'a'},
+		{"max-align", required_argument, NULL, 'g'},
 		{"seed", required_argument, NULL, 's'},
 		{0, 0, 0, 0}
 	};
 
-	for (int opt = getopt_long(argc, argv, "f:i:s:", options, NULL);
+	for (int opt = getopt_long(argc, argv, short_opts, long_opts, NULL);
 		 opt != -1;)
 	{
 		char *end = "";
 
 		switch (opt)
 		{
+		case 'a':
+			max_alloc = strtoul(optarg, &end, 0);
+			if (*end)
+				ARGS_ERROR("-a, --max-alloc", optarg);
+
+			break;
 		case 'f':
 			minimum_field_size = strtoul(optarg, &end, 0);
 			if (*end)
 				ARGS_ERROR("-f, --field-size", optarg);
 
 			break;
+		case 'g':
+			max_align = strtoul(optarg, &end, 0);
+			if (*end)
+				ARGS_ERROR("-g, --max-align", optarg);
+
+			if (max_align > 16)
+			{
+				fprintf(stderr, "alignment %u out of range 0-16\n", max_align);
+				return (1);
+			}
+
+			break;
+		case 'h':
+			print_help(argv[0]);
+			return (0);
 		case 'i':
 			iterations = strtoul(optarg, &end, 0);
 			if (*end)
@@ -101,7 +147,7 @@ int main(int argc, char *argv[])
 		if (*end)
 			return (1);
 
-		opt = getopt_long(argc, argv, "f:i:s:", options, NULL);
+		opt = getopt_long(argc, argv, short_opts, long_opts, NULL);
 	}
 
 	Arena *const arena = arena_new();
@@ -117,8 +163,8 @@ int main(int argc, char *argv[])
 
 		if (!arrays[idx].arr)  // Allocate memory and write to it.
 		{
-			arrays[idx].len = (rand() % (2 << 13)) + 1;
-			len_ty align = 1 << (rand() % 11);  // 1, 2, 4 ... 1024
+			arrays[idx].len = (rand() % max_alloc) + 1;
+			len_ty align = 1 << (rand() % (max_align + 1));
 
 			if (align > arrays[idx].len)
 				align = 1;

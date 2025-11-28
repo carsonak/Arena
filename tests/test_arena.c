@@ -189,7 +189,7 @@ TEST_F(AlignedAllocations, AllocFree1)
 
 		REQUIRE(ptrs[i] != NULL, "alloc failed");
 		CHECK(is_aligned(ptrs[i], size), "pointer not aligned");
-		memset(ptrs[i], size & 0xFF, size);
+		memset(ptrs[i], 'a' + i, size);
 
 		ptrs[i] = arena_free(tau->arena, ptrs[i]);
 	}
@@ -203,7 +203,7 @@ TEST_F(AlignedAllocations, AllocFree1)
 
 		REQUIRE(ptrs[i] != NULL, "alloc failed");
 		CHECK(is_aligned(ptrs[i], size), "pointer not aligned");
-		memset(ptrs[i], size & 0xFF, size);
+		memset(ptrs[i], 'a' + i, size);
 	}
 
 	for (len_ty i = 0; i < 11; i++)
@@ -223,7 +223,7 @@ TEST_F(AlignedAllocations, AllocFree2)
 
 		REQUIRE(ptrs[i] != NULL, "alloc failed");
 		CHECK(is_aligned(ptrs[i], size), "pointer not aligned");
-		memset(ptrs[i], size & 0xFF, size);
+		memset(ptrs[i], 'a' + i, size);
 	}
 
 	for (len_ty i = 0; i < 11; i++)
@@ -238,7 +238,7 @@ TEST_F(AlignedAllocations, AllocFree2)
 
 		REQUIRE(ptrs[i] != NULL, "alloc failed");
 		CHECK(is_aligned(ptrs[i], size), "pointer not aligned");
-		memset(ptrs[i], size & 0xFF, size);
+		memset(ptrs[i], 'a' + i, size);
 
 		ptrs[i] = arena_free(tau->arena, ptrs[i]);
 	}
