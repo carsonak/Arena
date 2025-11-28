@@ -7,6 +7,8 @@
 #include "arena.h"
 #include "arena_struct.h"
 
+#include "compiler_attributes_macros.h"
+
 #define ARRAY_ISEMPTY(array)                                                  \
 	(!(array) ||                                                              \
 	 memcmp(                                                                  \
@@ -20,20 +22,20 @@ static bool is_aligned(void *const ptr, const ulen_ty alignment)
 	return ((ulen_ty)ptr & (alignment - 1)) == 0;
 }
 
-struct ArenaTests
+struct InvalidInputs
 {
 	Arena *arena;
 };
 
-TEST_F_SETUP(ArenaTests)
+TEST_F_SETUP(InvalidInputs)
 {
 	tau->arena = arena_new();
 	REQUIRE(tau->arena != NULL, "arena creation failed");
 }
 
-TEST_F_TEARDOWN(ArenaTests) { tau->arena = arena_delete(tau->arena); }
+TEST_F_TEARDOWN(InvalidInputs) { tau->arena = arena_delete(tau->arena); }
 
-TEST_F(ArenaTests, InvalidInputs)
+TEST_F(InvalidInputs, InvalidInput)
 {
 	CHECK(
 		arena_alloc(tau->arena, 0, 8) == NULL, "Size should be greater than 0"
@@ -55,6 +57,19 @@ TEST_F(ArenaTests, InvalidInputs)
 	);
 }
 
+struct ArenaTests
+{
+	Arena *arena;
+};
+
+TEST_F_SETUP(ArenaTests)
+{
+	tau->arena = arena_new();
+	REQUIRE(tau->arena != NULL, "arena creation failed");
+}
+
+TEST_F_TEARDOWN(ArenaTests) { tau->arena = arena_delete(tau->arena); }
+
 TEST_F(ArenaTests, BasicLifecycle)
 {
 	char *ch = arena_alloc(tau->arena, sizeof(*ch), _alignof(char));
@@ -75,18 +90,6 @@ TEST_F(ArenaTests, BasicLifecycle)
 	REQUIRE(maxint != NULL, "alloc failed");
 	*maxint = INTMAX_MIN;
 	CHECK(*maxint == INTMAX_MIN, "Memory read/write failed");
-}
-
-TEST_F(ArenaTests, Alignment)
-{
-	for (len_ty a = 1; a <= 1 << 10; a *= 2)
-	{
-		void *p1 = arena_alloc(tau->arena, 10, 1);
-
-		REQUIRE(p1 != NULL, "alloc failed");
-		CHECK(is_aligned(p1, 1), "pointer not aligned");
-		memset(p1, 'w', 10);
-	}
 }
 
 TEST_F(ArenaTests, FieldExpansion)
@@ -160,6 +163,87 @@ TEST_F(ArenaTests, FreeListReuse)
 	CHECK(tau->arena->head->top == top, "arena should not bump the top");
 }
 
+struct AlignedAllocations
+{
+	Arena *arena;
+};
+
+TEST_F_SETUP(AlignedAllocations)
+{
+	tau->arena = arena_new();
+	REQUIRE(tau->arena != NULL, "arena creation failed");
+}
+
+TEST_F_TEARDOWN(AlignedAllocations) { tau->arena = arena_delete(tau->arena); }
+
+TEST_F(AlignedAllocations, AllocFree1)
+{
+	unsigned char *ptrs[11] = {0};
+
+	/* alloc and immediately free. */
+	for (len_ty i = 0; i < 11; i++)
+	{
+		const len_ty size = 1 << i;
+
+		ptrs[i] = arena_alloc(tau->arena, size, size);
+
+		REQUIRE(ptrs[i] != NULL, "alloc failed");
+		CHECK(is_aligned(ptrs[i], size), "pointer not aligned");
+		memset(ptrs[i], size & 0xFF, size);
+
+		ptrs[i] = arena_free(tau->arena, ptrs[i]);
+	}
+
+	/* alloc all at once then free later. */
+	for (len_ty i = 0; i < 11; i++)
+	{
+		const len_ty size = 1 << i;
+
+		ptrs[i] = arena_alloc(tau->arena, size, size);
+
+		REQUIRE(ptrs[i] != NULL, "alloc failed");
+		CHECK(is_aligned(ptrs[i], size), "pointer not aligned");
+		memset(ptrs[i], size & 0xFF, size);
+	}
+
+	for (len_ty i = 0; i < 11; i++)
+		ptrs[i] = arena_free(tau->arena, ptrs[i]);
+}
+
+TEST_F(AlignedAllocations, AllocFree2)
+{
+	unsigned char *ptrs[11] = {0};
+
+	/* alloc all at once then free later. */
+	for (len_ty i = 0; i < 11; i++)
+	{
+		const len_ty size = 1 << i;
+
+		ptrs[i] = arena_alloc(tau->arena, size, size);
+
+		REQUIRE(ptrs[i] != NULL, "alloc failed");
+		CHECK(is_aligned(ptrs[i], size), "pointer not aligned");
+		memset(ptrs[i], size & 0xFF, size);
+	}
+
+	for (len_ty i = 0; i < 11; i++)
+		ptrs[i] = arena_free(tau->arena, ptrs[i]);
+
+	/* alloc and immediately free. */
+	for (len_ty i = 0; i < 11; i++)
+	{
+		const len_ty size = 1 << i;
+
+		ptrs[i] = arena_alloc(tau->arena, size, size);
+
+		REQUIRE(ptrs[i] != NULL, "alloc failed");
+		CHECK(is_aligned(ptrs[i], size), "pointer not aligned");
+		memset(ptrs[i], size & 0xFF, size);
+
+		ptrs[i] = arena_free(tau->arena, ptrs[i]);
+	}
+}
+
 struct ArenaReset
 {
 	Arena *arena;
@@ -194,9 +278,8 @@ TEST_F(ArenaReset, Reset)
 
 	REQUIRE(p4 != NULL, "allocation failed");
 	memset(p4, 'w', 100);
-	// In a stack allocator, p4 should essentially equal p1
-	// (assuming alignment and headers match exactly)
-	CHECK(p4 == p1, "Reset did not roll back the top pointer correctly");
+	// The arena should retain the largest field it has.
+	CHECK(tau->arena->head->size >= tau->arena->minimum_field_size);
 	// Check that free blocks were cleared
 	CHECK(
 		ARRAY_ISEMPTY(tau->arena->blocks),
@@ -225,7 +308,7 @@ TEST_F(ArenaReset, ResetWithFree)
 
 	REQUIRE(p4 != NULL, "allocation failed");
 	memset(p4, 'w', 100);
-	CHECK(p4 == p1, "Reset did not roll back the top pointer correctly");
+	CHECK(tau->arena->head->size >= tau->arena->minimum_field_size);
 	CHECK(
 		ARRAY_ISEMPTY(tau->arena->blocks),
 		"list of free blocks should be empty."
@@ -255,7 +338,7 @@ TEST_F(ArenaReset, ResetWithFieldExpansion)
 
 	REQUIRE(p4 != NULL, "allocation failed");
 	memset(p4, 'w', 100);
-	CHECK(p4 == p1, "Reset did not roll back the top pointer correctly");
+	CHECK(tau->arena->head->size >= tau->arena->minimum_field_size);
 	CHECK(
 		ARRAY_ISEMPTY(tau->arena->blocks),
 		"list of free blocks should be empty."
@@ -286,7 +369,7 @@ TEST_F(ArenaReset, ResetWithFieldExpansionWithFree)
 
 	REQUIRE(p4 != NULL, "allocation failed");
 	memset(p4, 'w', 100);
-	CHECK(p4 == p1, "Reset did not roll back the top pointer correctly");
+	CHECK(tau->arena->head->size >= tau->arena->minimum_field_size);
 	CHECK(
 		ARRAY_ISEMPTY(tau->arena->blocks),
 		"list of free blocks should be empty."

@@ -59,7 +59,7 @@ int main(int argc, char *argv[])
 
 	ulen_ty iterations = 1 << 20;
 	unsigned seed = 0x12345;
-	ulen_ty minimum_field_size = 1024U * 1024;  // 1MB
+	ulen_ty minimum_field_size = 256U * 1024;  // 256KB
 	struct option options[] = {
 		{"field-size", required_argument, NULL, 'f'},
 		{"iterations", required_argument, NULL, 'i'},
@@ -117,7 +117,7 @@ int main(int argc, char *argv[])
 
 		if (!arrays[idx].arr)  // Allocate memory and write to it.
 		{
-			arrays[idx].len = (rand() % (2 << 12)) + 1;
+			arrays[idx].len = (rand() % (2 << 13)) + 1;
 			len_ty align = 1 << (rand() % 11);  // 1, 2, 4 ... 1024
 
 			if (align > arrays[idx].len)

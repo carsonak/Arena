@@ -3,10 +3,20 @@
 #include <stdio.h>    // perror
 #include <stdlib.h>   // calloc
 #include <string.h>   // memset
-#include <sys/mman.h>  // mmap, munmap
+
+#if defined(_WIN32) || defined(_WIN64)
+	#define ARENA_PLATFORM_WINDOWS
+	#define WIN32_LEAN_AND_MEAN
+	#include <memoryapi.h>  // VirtualAlloc, VirtualFree
+#else
+	#define ARENA_PLATFORM_POSIX
+	#include <sys/mman.h>  // mmap, munmap
+#endif
 
 #include "arena.h"
 #include "arena_struct.h"
+
+/* This file should be included after arena.h and arena_struct.h */
 #include "compiler_attributes_macros.h"
 
 /********************************** MACROS ****************************************/
@@ -18,8 +28,9 @@
 #define ARRAY_LEN(arr) (sizeof(arr) / sizeof(*(arr)))
 
 #if defined(__has_feature)
-	#if __has_feature(address_sanitizer)  // for clang
-		#define __SANITIZE_ADDRESS__      // GCC already sets this
+	#if __has_feature(address_sanitizer)
+		/* For clang as GCC already sets this. */
+		#define __SANITIZE_ADDRESS__
 	#endif
 #endif
 
@@ -42,6 +53,11 @@ typedef unsigned char u8;
 
 /****************************** STATIC FUNCTIONS **********************************/
 
+static void os_virtual_free(void *const ptr, const size_t size);
+static void *os_virtual_alloc(const ulen_ty size) _malloc _malloc_free(
+	os_virtual_free
+) _alloc_size(1);
+
 static Free_block *fb_search(
 	Arena *const arena, const ulen_ty size, const ulen_ty alignment
 ) _nonnull;
@@ -61,6 +77,63 @@ arena_push_field(Arena *const restrict arena, const ulen_ty capacity) _nonnull;
 static bool alignment_isvalid(const ulen_ty a)
 {
 	return (a > 0 && IS_POWER2(a));
+}
+
+/*!
+ * @brief allocate a given size of virtual memory for the calling process.
+ *
+ * @param size size of memory to allocate.
+ * @returns pointer to the memory region, NULL on error.
+ */
+static void *os_virtual_alloc(const ulen_ty size)
+{
+	assert(size > 0);
+#if defined(ARENA_PLATFORM_WINDOWS)
+	void *const ptr =
+		VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+	if (!ptr)
+	{
+		return (NULL);
+	}
+#elif defined(ARENA_PLATFORM_POSIX)
+	void *const ptr = mmap(
+		NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0
+	);
+
+	if (ptr == MAP_FAILED)
+	{
+		perror("mmap fail");
+		return (NULL);
+	}
+#else
+	#error "Unsupported Platform"
+#endif
+
+	return ptr;
+}
+
+/*!
+ * @brief deallocate virtual memory of the calling process.
+ *
+ * @param ptr pointer to the beginning of the memory to deallocate.
+ * @param size size of the memory to deallocate.
+ */
+static void os_virtual_free(void *const ptr, const size_t size)
+{
+#if defined(ARENA_PLATFORM_WINDOWS)
+	(void)size; /* Unused on Windows for MEM_RELEASE */
+	bool err = VirtualFree(ptr, 0, MEM_RELEASE);
+
+	assert(err != false && "VirtualFree fail");
+#elif defined(ARENA_PLATFORM_POSIX)
+	int err = munmap(ptr, size);
+
+	assert(err != -1 && "munmap fail");
+#else
+	#error "Unsupported Platform"
+#endif
+	(void)err;
 }
 
 /*!
@@ -134,33 +207,6 @@ static ulen_ty size_class_index(const ulen_ty size)
 static bool arena_isvalid(const Arena *const arena)
 {
 	return (arena && arena->minimum_field_size > 0);
-}
-
-/*!
- * @brief push a new Field onto an Arena.
- *
- * @param arena pointer to the arena.
- * @param capacity minimum Field size to allocate.
- * @returns pointer to the pushed Field.
- */
-static Field *
-arena_push_field(Arena *const restrict arena, const ulen_ty capacity)
-{
-	assert(arena_isvalid(arena));
-	assert(capacity > 0);
-	ulen_ty size = arena->minimum_field_size;
-
-	while (size / 2 < capacity)
-		size *= 2;
-
-	Field *const field = field_new(size);
-
-	if (!field)
-		return (NULL);
-
-	field->next = arena->head;
-	arena->head = field;
-	return (field);
 }
 
 /*!
@@ -248,9 +294,7 @@ fb_insert(Arena *const restrict arena, Free_block *const restrict block)
  */
 static void field_delete(Field *const field)
 {
-	const int err = munmap(field, field->size + sizeof(*field));
-	assert(err != -1 && "munmap fail");
-	(void)err;
+	os_virtual_free(field, field->size + sizeof(*field));
 }
 
 /*!
@@ -263,20 +307,40 @@ static void field_delete(Field *const field)
 static Field *field_new(const ulen_ty size)
 {
 	assert(size > 0);
-	Field *const field = mmap(
-		NULL, size + sizeof(*field), PROT_READ | PROT_WRITE,
-		MAP_PRIVATE | MAP_ANONYMOUS, -1, 0
-	);
+	Field *const field = os_virtual_alloc(size + sizeof(*field));
 
 	if (!field)
-	{
-		perror("mmap error");
 		return (NULL);
-	}
 
 	*field = (Field){.size = size};
 	field->top = field->base;
 	ASAN_POISON_MEMORY_REGION(field->base, field->size);
+	return (field);
+}
+
+/*!
+ * @brief push a new Field onto an Arena.
+ *
+ * @param arena pointer to the arena.
+ * @param capacity minimum Field size to allocate.
+ * @returns pointer to the pushed Field.
+ */
+static Field *
+arena_push_field(Arena *const restrict arena, const ulen_ty capacity)
+{
+	assert(arena_isvalid(arena));
+	assert(capacity > 0);
+
+	while (arena->minimum_field_size / 2 < capacity)
+		arena->minimum_field_size *= 2;
+
+	Field *const field = field_new(arena->minimum_field_size);
+
+	if (!field)
+		return (NULL);
+
+	field->next = arena->head;
+	arena->head = field;
 	return (field);
 }
 
@@ -338,12 +402,16 @@ void arena_reset(Arena *const arena)
 
 	if (arena->head)
 	{
-		for (Field *next = arena->head->next; next; next = next->next)
+		/* Keep the largest field, free the rest. */
+		for (Field *walk = arena->head->next; walk;)
 		{
-			field_delete(arena->head);
-			arena->head = next;
+			Field *const next = walk->next;
+
+			field_delete(walk);
+			walk = next;
 		}
 
+		arena->head->next = NULL;
 		arena->head->top = arena->head->base;
 	}
 
@@ -365,7 +433,7 @@ void arena_reset(Arena *const arena)
  * @returns an aligned pointer to a memory block atleast `size` bytes,
  * NULL on error.
  */
-void *arena_alloc(Arena *const arena, ulen_ty size, ulen_ty alignment)
+void *arena_alloc(Arena *const arena, ulen_ty size, const ulen_ty alignment)
 {
 	if (!arena_isvalid(arena) || size < 1 || alignment > size ||
 		!alignment_isvalid(alignment))
@@ -377,14 +445,14 @@ void *arena_alloc(Arena *const arena, ulen_ty size, ulen_ty alignment)
 
 	if (block)
 	{
-		u8 *const user_space = (u8 *)block + sizeof(block->size);
-		const ulen_ty aligned = align_up((ulen_ty)user_space, alignment);
+		u8 *const usable_mem = (u8 *)block + sizeof(block->size);
+		const ulen_ty aligned = align_up((ulen_ty)usable_mem, alignment);
 
 		/* Unpoison the minimum memory needed to fulfil user's request. */
 		ASAN_UNPOISON_MEMORY_REGION(
-			user_space, (aligned - (len_ty)user_space) + size
+			usable_mem, (aligned - (len_ty)usable_mem) + size
 		);
-		memset(user_space, 0, aligned - (ulen_ty)user_space);
+		memset(usable_mem, 0, aligned - (ulen_ty)usable_mem);
 #ifdef ARENA_STATS
 		arena->allocs++;
 		arena->memory_inuse += block->size;
@@ -395,10 +463,10 @@ void *arena_alloc(Arena *const arena, ulen_ty size, ulen_ty alignment)
 
 	/* Otherwise, allocate from the top of the Arena. */
 
+	/* Ensure we allocate enough space to fit atleast 1 `Free_block`. */
 	if (size < sizeof(Free_block) - sizeof(block->size))
 		size = sizeof(Free_block) - sizeof(block->size);
 
-	/* Align memory and leave some space before the memory to store the size. */
 	Field *field = arena->head;
 
 	if (!field)
@@ -409,11 +477,10 @@ void *arena_alloc(Arena *const arena, ulen_ty size, ulen_ty alignment)
 	}
 
 	const ulen_ty alignof_fb = _alignof(Free_block);
-	alignment = alignof_fb > alignment ? alignof_fb : alignment;
 	/* The first few bytes of memory are reserved for internal book keeping. */
-	u8 *user_space = (u8 *)field->top + sizeof(block->size);
+	ulen_ty usable_mem = (ulen_ty)field->top + sizeof(block->size);
 	/* The aligned pointer to return. */
-	ulen_ty aligned = align_up((ulen_ty)user_space, alignment);
+	ulen_ty aligned = align_up(usable_mem, alignment);
 	/* top should always be aligned to store a `Free_block` struct. */
 	u8 *new_top = (u8 *)align_up(aligned + size, alignof_fb);
 
@@ -423,8 +490,8 @@ void *arena_alloc(Arena *const arena, ulen_ty size, ulen_ty alignment)
 		if (!field)
 			return (arena_delete(arena));
 
-		user_space = (u8 *)field->top + sizeof(block->size);
-		aligned = align_up((ulen_ty)user_space, alignment);
+		usable_mem = (ulen_ty)field->top + sizeof(block->size);
+		aligned = align_up(usable_mem, alignment);
 		new_top = (u8 *)align_up(aligned + size, alignof_fb);
 	}
 
@@ -442,7 +509,7 @@ void *arena_alloc(Arena *const arena, ulen_ty size, ulen_ty alignment)
 	/* The gap between the size and the pointer to be returned should be zeroed. */
 
 	block = (Free_block *)memset(field->top, 0, aligned - (ulen_ty)field->top);
-	block->size = new_top - user_space;
+	block->size = (ulen_ty)new_top - usable_mem;
 	field->top = new_top;
 #ifdef ARENA_STATS
 	arena->allocs++;

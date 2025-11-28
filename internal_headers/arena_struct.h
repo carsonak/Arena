@@ -1,6 +1,7 @@
 #ifndef ARENA_STRUCT_H
 #define ARENA_STRUCT_H
 
+#include "compiler_attributes_macros.h"
 #include "len_type.h"
 
 #define ARRAY_LEN(arr) (sizeof(arr) / sizeof(*(arr)))
@@ -10,6 +11,17 @@ static const unsigned int FREE_BLOCKS_SIZES[] = {
 	2 << 4,  2 << 5,  2 << 6,  2 << 7,  2 << 8,  2 << 9,  2 << 10, 2 << 11,
 	2 << 12, 2 << 13, 2 << 14, 2 << 15, 2 << 16, 2 << 17, 2 << 18, 2 << 19,
 };
+
+/*!
+ * @brief node of a linked list of free blocks in an arena.
+ */
+typedef struct Free_block
+{
+	/*! size in bytes of the memory block. */
+	ulen_ty size;
+	/*! pointer to the next free memory block. */
+	struct Free_block /* _alignas(16) */ *restrict next;
+} Free_block;
 
 /*!
  * @brief details of a chunk of reserved memory in an arena.
@@ -23,19 +35,8 @@ typedef struct Field
 	/*! @private start of untouched memory in the Field. */
 	unsigned char *top;
 	/*! @private start of usable memory in the Field. */
-	unsigned char base[];
+	unsigned char _alignas(_alignof(Free_block)) base[];
 } Field;
-
-/*!
- * @brief node of a linked list of free blocks in an arena.
- */
-typedef struct Free_block
-{
-	/*! size in bytes of the memory block. */
-	ulen_ty size;
-	/*! pointer to the next free memory block. */
-	struct Free_block *restrict next;
-} Free_block;
 
 /*!
  * @brief data for an arena allocator.

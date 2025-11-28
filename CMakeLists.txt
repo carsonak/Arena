@@ -33,7 +33,11 @@ add_compile_options(
 add_link_options("$<$<CONFIG:RelWithDebInfo>:-fsanitize=address,undefined>")
 
 add_library(arena arena.c)
-target_include_directories(arena PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+target_include_directories(
+    arena
+    PUBLIC ${CMAKE_CURRENT_LIST_DIR}
+    PRIVATE internal_headers
+)
 
 # Tests are automatically built if this is the main project
 option(ARENA_ENABLE_TESTING "Enable tests for bigint_calc"

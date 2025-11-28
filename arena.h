@@ -18,4 +18,6 @@ void *arena_alloc(
 	Arena *const arena, uintptr_t size, const uintptr_t alignment
 ) _malloc _alloc_size(2);
 
+#include "undef_compiler_attributes_macros.h"
+
 #endif /* ARENA_H */
