@@ -10,7 +10,7 @@ typedef struct Arena Arena;
 /* allocation */
 
 void *arena_delete(Arena *const arena);
-Arena *arena_new() _malloc _malloc_free(arena_delete, 1);
+Arena *arena_new(void) _malloc _malloc_free(arena_delete, 1);
 
 void arena_reset(Arena *const arena);
 void *arena_free(Arena *const restrict arena, void *const restrict ptr);

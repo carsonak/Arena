@@ -379,7 +379,7 @@ void *arena_delete(Arena *const arena)
  *
  * @returns pointer to the new arena, NULL on error.
  */
-Arena *arena_new()
+Arena *arena_new(void)
 {
 	Arena *const arena = calloc(1, sizeof(*arena));
 
